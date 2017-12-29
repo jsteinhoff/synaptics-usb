@@ -86,6 +86,11 @@
 #define info(format,...) printk(KERN_INFO "cpad: " format "\n" , ## __VA_ARGS__)
 #define err(format,...) printk(KERN_ERR "cpad: " format "\n" , ## __VA_ARGS__)
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,8)
+#define usb_kill_urb(urb) usb_unlink_urb(urb)
+#endif
+
+
 /*****************************************************************************
  *	data types							     *
  *****************************************************************************/
@@ -277,7 +282,6 @@ static struct usb_driver cpad_driver = {
 
 #define MAX_DEVICES	16
 static struct cpad_context *cpad_table[MAX_DEVICES] = { 0 };
-static int cpad_table_index = MAX_DEVICES - 1;
 static DECLARE_MUTEX (cpad_table_sem);
 
 static int cpad_probe(struct usb_interface *interface,
@@ -329,15 +333,12 @@ static int cpad_probe(struct usb_interface *interface,
 	cpad->present = 1;
 	cpad->table_index = -1;
 	down(&cpad_table_sem);
-	for (i=0; i<MAX_DEVICES; i++) {
-		if (++cpad_table_index == MAX_DEVICES)
-			cpad_table_index = 0;
-		if (cpad_table[cpad_table_index] == 0) {
-			cpad->table_index = cpad_table_index;
-			cpad_table[cpad_table_index] = cpad;
+	for (i=0; i<MAX_DEVICES; i++)
+		if (cpad_table[i] == 0) {
+			cpad->table_index = i;
+			cpad_table[i] = cpad;
 			break;
 		}
-	}
 	down(&cpad->sem);
 	up(&cpad_table_sem);
 	usb_set_intfdata (interface, cpad);
@@ -376,7 +377,7 @@ static void cpad_disconnect(struct usb_interface *interface)
 
 	down (&cpad->open_count_sem);
 
-	/* prevent device read, write, ioctl and creation of new works */
+	/* prevent device read, write, ioctl and creation of new work */
 	cpad->present = 0;
 	if (cpad->table_index >= 0)
 		cpad_table[cpad->table_index] = 0;
@@ -679,7 +680,6 @@ static inline int cpad_submit_display_urb(struct cpad_context *cpad)
 	return res;
 }
 
-/* structure must be locked before calling this */
 static int cpad_nlcd_function(struct cpad_context *cpad, unsigned char func,
 				unsigned char val)
 {
@@ -744,7 +744,7 @@ static void cpad_light_off(void *arg)
 	up (&cpad->sem);
 }
 
-/* flash the backlight, time in 10ms. call with structure locked */
+/* flash the backlight, time in 10ms. */
 static int cpad_flash(struct cpad_context *cpad, int time)
 {
 	struct work_struct *flash = &cpad->display.flash;
@@ -1922,7 +1922,10 @@ error:
 static int cpad_fb_mmap(struct fb_info *info, struct file *file,
 			struct vm_area_struct *vma)
 {
-	unsigned long page, kva, pos;
+	unsigned long page, pos;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
+	unsigned long kva;
+#endif
 	unsigned long start = vma->vm_start;
 	unsigned long size  = vma->vm_end-vma->vm_start;
 
@@ -1934,11 +1937,17 @@ static int cpad_fb_mmap(struct fb_info *info, struct file *file,
 
 	pos = (unsigned long) info->screen_base;
 	while (size > 0) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,10)
+		page = page_to_pfn(vmalloc_to_page((void *)pos));
+		if (remap_pfn_range(vma, start, page, PAGE_SIZE, PAGE_SHARED))
+			return -EAGAIN;
+#else
 		kva = (unsigned long)page_address(vmalloc_to_page((void *)pos));
 		kva |= pos & (PAGE_SIZE-1);
 		page = __pa(kva);
-		if (remap_pfn_range(vma, start, page >> PAGE_SHIFT, PAGE_SIZE, PAGE_SHARED))
+		if (remap_page_range(vma, start, page, PAGE_SIZE, PAGE_SHARED))
 			return -EAGAIN;
+#endif
 
 		start += PAGE_SIZE;
 		pos += PAGE_SIZE;
@@ -2009,9 +2018,6 @@ static inline unsigned char *cpad_fb_convert_line(struct cpad_context *cpad,
 			black = cpad_fb_dither(x, line, grey, maxgrey,
 							cpad->fb.dither);
 
-			if (cpad->fb.invert)
-				black = !black;
-
 			if (black) {
 				set_bit (bit, (unsigned long *) &param[byte]);
 			}
@@ -2026,7 +2032,24 @@ static inline unsigned char *cpad_fb_convert_line(struct cpad_context *cpad,
 }
 
 static inline unsigned char *cpad_fb_fillpacket(unsigned char *param,
-			size_t param_size, unsigned char *out_buf, int *changed)
+			size_t param_size, unsigned char *out_buf, int invert)
+{
+	unsigned char *point;
+
+	if (invert) {
+		*(out_buf++) = SEL_1335;
+		*(out_buf++) = MWRITE_1335;
+		for (point=param+param_size-1; point>=param; point--)
+			*(out_buf++) = ~(*point);
+		return out_buf;
+	} else {
+		return cpad_1335_fillpacket(MWRITE_1335, param, 30, out_buf);
+	}
+}
+
+static inline unsigned char *cpad_fb_fillpacket_onlychanged(
+		unsigned char *param, size_t param_size,
+		unsigned char *out_buf, int invert, int *changed)
 {
 	unsigned char *point;
 
@@ -2037,7 +2060,7 @@ static inline unsigned char *cpad_fb_fillpacket(unsigned char *param,
 		if (*out_buf == *point) {
 			(*changed)--;
 		} else {
-			*out_buf = *point;
+			*out_buf = invert ? ~(*point) : *point;
 		}
 		out_buf++;
 	}
@@ -2058,14 +2081,15 @@ static inline void cpad_fb_oneframe_1bpp(struct cpad_context *cpad,
 	}
 
 	for (line=0; line<maxline; line++) {
-		out_buf = cpad_1335_fillpacket(MWRITE_1335, param, 30, out_buf);
+		out_buf = cpad_fb_fillpacket(param, 30, out_buf,
+						cpad->fb.invert);
 		param += 30;
 	}
 
 	if (cpad->fb.onlyvisible) {
 		*urb_size = 160*32;
 	} else {
-		cpad_1335_fillpacket (MWRITE_1335, param, 2, out_buf);
+		cpad_fb_fillpacket (param, 2, out_buf, cpad->fb.invert);
 		*urb_size = 273*32 + 4;
 	}
 }
@@ -2080,7 +2104,8 @@ static inline void cpad_fb_oneframe_24bpp(struct cpad_context *cpad,
 
 	for (line=0; line<160; line++) {
 		vmem = cpad_fb_convert_line (cpad, line, vmem, param);
-		out_buf = cpad_1335_fillpacket(MWRITE_1335, param, 30, out_buf);
+		out_buf = cpad_fb_fillpacket(param, 30, out_buf,
+						cpad->fb.invert);
 	}
 	*urb_size = 160*32;
 }
@@ -2101,8 +2126,9 @@ static inline void cpad_fb_oneframe_1bpp_onlychanged(struct cpad_context *cpad,
 	}
 
 	for (line=0; line<maxline; line++) {
-		out_buf = cpad_fb_fillpacket (param, (line==273) ? 2 : 30,
-							out_buf, &changed);
+		out_buf = cpad_fb_fillpacket_onlychanged (
+				param, (line==273) ? 2 : 30, out_buf,
+				cpad->fb.invert, &changed);
 		param += 30;
 		if (changed) {
 			if (gotfirstline) {
@@ -2136,7 +2162,8 @@ static inline void cpad_fb_oneframe_24bpp_onlychanged(struct cpad_context *cpad,
 
 	for (line=0; line<160; line++) {
 		vmem = cpad_fb_convert_line (cpad, line, vmem, param);
-		out_buf = cpad_fb_fillpacket (param, 30, out_buf, &changed);
+		out_buf = cpad_fb_fillpacket_onlychanged (param, 30, out_buf,
+						cpad->fb.invert, &changed);
 		if (changed) {
 			if (gotfirstline) {
 				lastline = line;

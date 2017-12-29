@@ -122,10 +122,10 @@ Enabling the frame buffer (disabled by default):
 Disabling the frame buffer:
 	echo "framerate:0" > /proc/driver/cpad/0
 
-Frame buffer dithering mode (default is 3):
+Frame buffer dithering mode (default is 3; only in 24 bpp mode):
 	echo "dithering:<number from 0 to 3>" > /proc/driver/cpad/0
 
-Frame buffer brightness (default is 200):
+Frame buffer brightness (default is 200; only in 24 bpp mode):
 	echo "brightness:<number from 0 to 10000>" > /proc/driver/cpad/0
 
 Invert black and white:
@@ -134,7 +134,7 @@ Invert black and white:
 Send only changed image lines:
 	echo "onlychanged:1" > /proc/driver/cpad/0
 
-Update only visible part of cPad memory (has no effect in 24 bpp mode):
+Update only visible part of cPad memory (only in 1 bpp mode):
 	echo "onlyvisible:1" > /proc/driver/cpad/0
 
 Draw only one frame:
@@ -142,7 +142,7 @@ Draw only one frame:
 
 
 Using the frame buffer device
-----------------------------
+-----------------------------
 The famebuffer is disabled by default. You can enable it with
 	echo "framerate:30" > /proc/driver/cpad/0
 The following examples assume that your primary display is /dev/fb0, so your 
@@ -195,15 +195,17 @@ Set maximum bpp to 1 (saves 108k memory):
 Bugs
 ----
 - With kernel >= 2.6.7 rmmod hangs while the evdev device of the cPad 
-  (/dev/input/event?) is in use. usbhid.ko seems to have the same problem.
-  If you are using Synaptics TouchPad driver for XFree86 and do rmmod from
-  xterm, it will hang. Switching to console and then back to X helps.
+  (/dev/input/event?) is in use. This was a bug in the input core, and
+  was fixed in kernel 2.6.10.
 
 
 Changes
 -------
+version 0.6:
+	invert screen now possible in 1 bpp mode too
+
 version 0.5:
-	Replaced deprecated MODULE_PARM and remap_page_size.
+	Replaced deprecated MODULE_PARM and remap_page_range.
 	Merged with the 2.4 package as the cpad-0.8 release.
 
 version 0.4:
