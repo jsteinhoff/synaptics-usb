@@ -953,7 +953,9 @@ static void synusb_disconnect(struct usb_interface *interface)
 }
 
 static struct usb_driver synusb_driver = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
 	.owner =	THIS_MODULE,
+#endif
 	.name =		"synaptics-usb",
 	.probe =	synusb_probe,
 	.disconnect =	synusb_disconnect,

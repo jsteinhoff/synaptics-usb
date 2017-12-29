@@ -34,16 +34,16 @@ cd ..
 
 cp -r linux-$KVER linux-$KVER-synusb
 cd linux-$KVER-synusb
-patch -p1 -i ../../$BASE_PATCH || leave 1
-#echo Press return to continue...; read
+patch -p1 --no-backup-if-mismatch -i ../../$BASE_PATCH || leave 1
 mkdir include
 mkdir include/linux
 cp ../../../synaptics-usb.c drivers/usb/input
 cp ../../../cpad.h include/linux
-if [ $VCODE -le 132622 ] ; then
+#echo Press return to continue...; read
+if [ $VCODE -le 132623 ] ; then
 	cp ../../../synusb-kcompat.h drivers/usb/input
 else
-	patch -p1 -i ../../cleanup.patch || leave 1
+	patch -p1 --no-backup-if-mismatch -i ../../cleanup.patch || leave 1
 fi
 cd ..
 

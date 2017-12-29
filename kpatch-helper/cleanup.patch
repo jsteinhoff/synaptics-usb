@@ -1,6 +1,6 @@
-diff -ruN linux-2.6.15-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.15-synusb-cleanup/drivers/usb/input/synaptics-usb.c
---- linux-2.6.15-synusb/drivers/usb/input/synaptics-usb.c	2006-01-26 00:51:58.212258752 +0100
-+++ linux-2.6.15-synusb-cleanup/drivers/usb/input/synaptics-usb.c	2006-01-26 00:56:35.071169800 +0100
+diff -ruN linux-2.6.16-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.16-synusb-cleanup/drivers/usb/input/synaptics-usb.c
+--- linux-2.6.16-synusb/drivers/usb/input/synaptics-usb.c	2006-04-03 05:34:14.513717152 +0200
++++ linux-2.6.16-synusb-cleanup/drivers/usb/input/synaptics-usb.c	2006-04-03 05:35:45.161936528 +0200
 @@ -22,8 +22,6 @@
   */
  
@@ -45,3 +45,13 @@ diff -ruN linux-2.6.15-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.15-syn
  	.minor_base =	USB_CPAD_MINOR_BASE,
  };
  
+@@ -953,9 +940,7 @@
+ }
+ 
+ static struct usb_driver synusb_driver = {
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
+ 	.owner =	THIS_MODULE,
+-#endif
+ 	.name =		"synaptics-usb",
+ 	.probe =	synusb_probe,
+ 	.disconnect =	synusb_disconnect,
