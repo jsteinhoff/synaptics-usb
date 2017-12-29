@@ -6,6 +6,7 @@
  *	cPad driver for kernel 2.4
  *
  *  Copyright (c) 2004 Jan Steinhoff <jan.steinhoff@uni-jena.de>
+ *  Copyright (c) 2004 Ron Lee (ron@debian.org)
  *	rewritten for kernel 2.6
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -72,12 +73,18 @@
 #include "cpadconfig.h"
 #include "cpad.h"
 
-#define DRIVER_VERSION "v0.4"
+#define DRIVER_VERSION "v0.8"
 #define DRIVER_AUTHOR	"Rob Miller (rob@inpharmatica . co . uk), "\
 			"Ron Lee (ron@debian.org), "\
 			"Jan Steinhoff <jan.steinhoff@uni-jena.de>"
 #define DRIVER_DESC "USB Synaptics cPad Driver"
 
+/* Why does hid.h export these publicly? */
+#undef info
+#undef err
+/* redefine them to be a little less noisy in the log */
+#define info(format,...) printk(KERN_INFO "cpad: " format "\n" , ## __VA_ARGS__)
+#define err(format,...) printk(KERN_ERR "cpad: " format "\n" , ## __VA_ARGS__)
 
 /*****************************************************************************
  *	data types							     *
@@ -274,7 +281,7 @@ static int cpad_table_index = MAX_DEVICES - 1;
 static DECLARE_MUTEX (cpad_table_sem);
 
 static int cpad_probe(struct usb_interface *interface,
-				const struct usb_device_id *id)
+		      const struct usb_device_id *id)
 {
 	struct usb_device *udev = interface_to_usbdev(interface);
 	struct cpad_context *cpad;
@@ -383,11 +390,11 @@ static void cpad_disconnect(struct usb_interface *interface)
 
 	del_timer_sync(&cpad->display.timer);
 
-	/* unlink urbs */
-	usb_unlink_urb(cpad->touchpad.in.urb);
+	/* cancel pending requests */
+	usb_kill_urb (cpad->touchpad.in.urb);
 	if (atomic_read (&cpad->display.busy)) {
-		usb_unlink_urb (cpad->display.out.urb);
-		usb_unlink_urb (cpad->display.in.urb);
+		usb_kill_urb (cpad->display.out.urb);
+		usb_kill_urb (cpad->display.in.urb);
 		wait_for_completion (&cpad->display.finished);
 	}
 
@@ -437,8 +444,8 @@ static void cpad_timeout_kill(unsigned long data)
 	struct cpad_context *cpad = (struct cpad_context *) data;
 
 	cpad->display.timed_out = 1;
-	usb_unlink_urb (cpad->display.out.urb);
-	usb_unlink_urb (cpad->display.in.urb);
+	usb_kill_urb (cpad->display.out.urb);
+	usb_kill_urb (cpad->display.in.urb);
 	err("cpad display urb timed out");
 }
 
@@ -765,7 +772,7 @@ static int cpad_flash(struct cpad_context *cpad, int time)
 #ifdef CONFIG_USB_CPADINPUT
 
 static int disable_input = 0;
-MODULE_PARM(disable_input, "i");
+module_param(disable_input, int, 0444);
 MODULE_PARM_DESC(disable_input, "disable cPad input device");
 
 #define XMIN_NOMINAL 1472
@@ -795,6 +802,7 @@ static void cpad_input_add(struct cpad_context *cpad)
 	idev->absmin[ABS_Y] = YMIN_NOMINAL;
 	idev->absmax[ABS_Y] = YMAX_NOMINAL;
 	idev->absmax[ABS_PRESSURE] = 255;
+	idev->absmax[ABS_TOOL_WIDTH] = 15;
 
 	/* setup buttons */
 	set_bit (EV_KEY, idev->evbit);
@@ -829,12 +837,14 @@ static void cpad_input_remove(struct cpad_context *cpad)
 		input_unregister_device(&cpad->touchpad.idev);
 }
 
+static int tool_width = 0;
+
 static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 {
 	struct cpad_context *cpad = urb->context;
 	unsigned char *data = cpad->touchpad.in.buffer;
 	struct input_dev *idev = &cpad->touchpad.idev;
-	int res, w, pressure, finger_width, num_fingers;
+	int res, w, pressure, num_fingers;
 
 	switch (urb->status) {
 	case 0:
@@ -853,25 +863,23 @@ static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 	w = data[0] & 0x0f;
 	pressure = data[6];
 	if (pressure > 0) {
-		finger_width = 5;
 		num_fingers = 1;
 		switch (w) {
-		case 0:
-			num_fingers = 2;
+		case 0 ... 1:
+			tool_width = tool_width > 5 ? tool_width : 5;
+			num_fingers = 2 + w;
 			break;
-		case 1:
-			num_fingers = 3;
-			break;
-		case 2:	/* pen detected, thread it as a finger */
+		case 2:	                /* pen, pretend its a finger */
+			tool_width = 5;
 			break;
 		case 4 ... 15:
-			finger_width = w;
+			tool_width = w;
 			break;
 		}
 	}
 	else {
 		num_fingers = 0;
-		finger_width = 0;
+		tool_width = 0;
 	}
 
 	input_regs (idev, regs);
@@ -886,7 +894,7 @@ static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 	}
 	input_report_abs (idev, ABS_PRESSURE, pressure);
 
-	input_report_abs (idev, ABS_TOOL_WIDTH, finger_width);
+	input_report_abs (idev, ABS_TOOL_WIDTH, tool_width);
 	input_report_key (idev, BTN_TOOL_FINGER, num_fingers == 1);
 	input_report_key (idev, BTN_TOOL_DOUBLETAP, num_fingers == 2);
 	input_report_key (idev, BTN_TOOL_TRIPLETAP, num_fingers == 3);
@@ -910,7 +918,7 @@ static void cpad_input_add(struct cpad_context *cpad)
 
 static void cpad_input_remove(struct cpad_context *cpad) { }
 
-/* data must always be fechted, otherwise cpad reconnects */
+/* data must always be fetched, otherwise cpad reconnects */
 static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 {
 	int retval;
@@ -954,7 +962,7 @@ static void cpad_submit_int_urb(void *arg)
 #ifdef CONFIG_USB_CPADDEV
 
 static int disable_cdev = 0;
-MODULE_PARM(disable_cdev, "i");
+module_param(disable_cdev, int, 0444);
 MODULE_PARM_DESC(disable_cdev, "disable cPad character device");
 
 #define USB_CPAD_MINOR_BASE	66
@@ -999,8 +1007,7 @@ static void cpad_dev_add(struct cpad_context *cpad)
 		return;
 	}
 	cpad->char_dev.minor = interface->minor;
-	info ("USB Synaptics device now attached to USBcpad-%d",
-							cpad->char_dev.minor);
+	info("cpad registered on minor: %d", cpad->char_dev.minor);
 }
 
 static void cpad_dev_remove(struct cpad_context *cpad)
@@ -1011,7 +1018,7 @@ static void cpad_dev_remove(struct cpad_context *cpad)
 		return;
 
 	usb_deregister_dev (interface, &cpad_class);
-	info("USB Synaptics cPad #%d now disconnected", cpad->char_dev.minor);
+	info("cpad disconnected");
 }
 
 static int cpad_dev_open (struct inode *inode, struct file *file)
@@ -1198,8 +1205,10 @@ error:
 
 int cpad_driver_num = CPAD_DRIVER_NUM;
 
-static int cpad_dev_ioctl (struct inode *inode, struct file *file,
-					unsigned int cmd, unsigned long arg)
+static int cpad_dev_ioctl (struct inode *inode,
+                           struct file  *file,
+                           unsigned int  cmd,
+                           unsigned long arg)
 {
 	struct cpad_context *cpad = (struct cpad_context *)file->private_data;
 	unsigned char cval = 0;
@@ -1264,12 +1273,18 @@ static int cpad_dev_ioctl (struct inode *inode, struct file *file,
 		usb_reset_device(cpad->udev);
 		break;
 
-	/* not yet supported */
+	/* not ever supported to date */
 	case CPAD_WIMAGEL:
-	/* no longer supported, only for compatibility */
+		res = -ENOTSUPP;
+		break;
+
+	/* no longer supported kernel side
+	   poke at apps which need to know */
 	case CPAD_SET_SENS:
 	case CPAD_SET_STROKE:
 	case CPAD_SET_ABS:
+		err("legacy relative mode ioctl attempted");
+		res = -EINVAL;
 		break;
 
 	default:
@@ -1303,7 +1318,7 @@ static void cpad_dev_remove(struct cpad_context *cpad) { }
 #ifdef CONFIG_USB_CPADPROCFS
 
 static int disable_procfs = 0;
-MODULE_PARM(disable_procfs, "i");
+module_param(disable_procfs, int, 0444);
 MODULE_PARM_DESC(disable_procfs, "disable cPad procfs interface");
 
 static struct proc_dir_entry *cpad_procfs_root;
@@ -1495,7 +1510,7 @@ static char *cpad_procfs_read_cdev(struct cpad_context *cpad, char *pos)
 					(int) cpad->char_dev.minor);
 	}
 #else
-	pos += sprintf(pos, "cdev:        not comliped in\n");
+	pos += sprintf(pos, "cdev:        not compiled in\n");
 #endif
 	return pos;
 }
@@ -1515,7 +1530,7 @@ static char *cpad_procfs_read_fb(struct cpad_context *cpad, char *pos)
 		pos += sprintf(pos, "onlyvisible: %i\n", cpad->fb.onlyvisible);
 	}
 #else
-	pos += sprintf(pos, "framebuffer: not comliped in\n");
+	pos += sprintf(pos, "framebuffer: not compiled in\n");
 #endif
 	return pos;
 }
@@ -1652,11 +1667,11 @@ static void cpad_procfs_remove(struct cpad_context *cpad) { }
 #ifdef CONFIG_USB_CPADFB
 
 static int disable_fb = 0;
-MODULE_PARM(disable_fb, "i");
+module_param(disable_fb, int, 0444);
 MODULE_PARM_DESC(disable_fb, "disable cPad frame buffer device");
 
 static int max_bpp = 24;
-MODULE_PARM(max_bpp, "i");
+module_param(max_bpp, int, 0444);
 MODULE_PARM_DESC(max_bpp, "maximum bpp, set to 1 to reduce mem usage");
 
 static struct fb_var_screeninfo cpad_fb_default_var = {
@@ -1922,7 +1937,7 @@ static int cpad_fb_mmap(struct fb_info *info, struct file *file,
 		kva = (unsigned long)page_address(vmalloc_to_page((void *)pos));
 		kva |= pos & (PAGE_SIZE-1);
 		page = __pa(kva);
-		if (remap_page_range(vma, start, page, PAGE_SIZE, PAGE_SHARED))
+		if (remap_pfn_range(vma, start, page >> PAGE_SHIFT, PAGE_SIZE, PAGE_SHARED))
 			return -EAGAIN;
 
 		start += PAGE_SIZE;

@@ -10,7 +10,7 @@ The cPad is an USB touchpad with background display (240x160 mono). If you
 don't want to use the display, you do not need this driver. The cPad emulates
 an USB mouse by default, so you can use the usbhid kernel module. But you
 will be able to use Synaptics TouchPad driver for XFree86 in combination with
-this kernel module, wich will greatly improve mouse movement. The Display can
+this kernel module, which will greatly improve mouse movement. The Display can
 be accessed via a frame buffer device and via a character device.
 
 
@@ -132,13 +132,13 @@ Invert black and white:
 	echo "invert:1" > /proc/driver/cpad/0
 
 Send only changed image lines:
-	echo "onlychanged:1" /proc/driver/cpad/0
+	echo "onlychanged:1" > /proc/driver/cpad/0
 
 Update only visible part of cPad memory (has no effect in 24 bpp mode):
-	echo "onlyvisible:1" /proc/driver/cpad/0
+	echo "onlyvisible:1" > /proc/driver/cpad/0
 
 Draw only one frame:
-	echo "oneframe" /proc/driver/cpad/0
+	echo "oneframe" > /proc/driver/cpad/0
 
 
 Using the frame buffer device
@@ -202,6 +202,10 @@ Bugs
 
 Changes
 -------
+version 0.5:
+	Replaced deprecated MODULE_PARM and remap_page_size.
+	Merged with the 2.4 package as the cpad-0.8 release.
+
 version 0.4:
 	replaced del_timer_sync with del_timer in interrupt context (bad bug)
 
