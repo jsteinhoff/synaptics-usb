@@ -1,13 +1,6 @@
 #include <linux/version.h>
 
-
-#if !defined(CONFIG_USB) && !defined(CONFIG_USB_MODULE)
-#error : kernel has no USB support. Compile kernel with CONFIG_USB.
-#endif
-#if !defined(CONFIG_INPUT) && !defined(CONFIG_INPUT_MODULE)
-#error : No input support. Compile kernel with CONFIG_INPUT to enable it.
-#endif
-
+#include "kconfig.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
 
