@@ -7,6 +7,19 @@
 #include <linux/workqueue.h>
 
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23)
+
+struct usb_anchor { };
+
+static inline void init_usb_anchor(struct usb_anchor *anchor) { }
+
+static inline void usb_kill_anchored_urbs(struct usb_anchor *anchor) { }
+static inline void usb_anchor_urb(struct urb *urb, struct usb_anchor *anchor) { }
+static inline void usb_unanchor_urb(struct urb *urb) { }
+
+#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23) */
+
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
 
 struct delayed_work {

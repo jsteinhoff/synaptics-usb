@@ -1,0 +1,100 @@
+#!/bin/sh
+
+print_help () {
+	echo "Usage:"
+	echo "	$0 <command> <value>"
+	echo
+	echo "rebind_to 	: <value> is the name of the kernel module where"
+	echo "		  to rebind to, i.e. synaptics-usb or usbhid."
+	echo "persist		: set if device is persitent during hibernation,"
+	echo "		  value can be on or off"
+	echo "suspend		: set suspend state, value can be on, off or auto."
+	echo "autosuspend	: value is the autosuspend time in seconds."
+	echo
+	exit 1
+}
+
+vendor=06cb
+device_list="0001 0002 0003 0008 0009"
+
+rebind () {
+	ddir=/sys/bus/usb/drivers/$2
+	idir=$1\:1.0
+	if [ $2 = synaptics-usb ] && [ -f $ddir/new_id ] ; then
+		for i in $device_list ; do
+			echo "$vendor $i" > $ddir/new_id
+		done
+	fi
+	if [ ! $idir/driver -ef $ddir ] ; then
+		if [ -f $ddir/bind ] ; then
+			interface=`basename $idir`
+			echo -n $interface 2> /dev/null > $idir/driver/unbind
+			echo -n $interface 2> /dev/null > $ddir/bind
+		else
+			echo "Using old rebind method..."
+			echo "1" 2> /dev/null > $2/module/parameters/rebind
+		fi
+		if [ ! $idir/driver -ef $ddir ] ; then
+			echo "ERROR: Can not rebind interface $interface"
+		fi
+	fi
+}
+
+persist () {
+	pwr=$1/power
+	case $2 in
+		on)	echo "1" > $pwr/persist ;;
+		off)	echo "0" > $pwr/persist ;;
+		*)	print_help ;;
+	esac
+}
+
+susp () {
+	pwr=$1/power
+	case $2 in
+		on)	echo "on" > $pwr/level
+			echo "disabled" > $pwr/wakeup
+			echo "suspend" > $pwr/level ;;
+		off)	echo "on" > $pwr/level ;;
+		auto)	echo "on" > $pwr/level
+			echo "enabled" > $pwr/wakeup
+			echo "auto" > $pwr/level ;;
+		*)	print_help ;;
+	esac
+}
+
+autosuspend () {
+	echo $2 > $1/power/autosuspend
+}
+
+do_all () {
+	if [ ! -d /sys/bus/usb/drivers/synaptics-usb ] ; then
+		/sbin/modprobe synaptics-usb
+		if [ ! -d /sys/bus/usb/drivers/synaptics-usb ] ; then
+			echo "ERROR: Can not load module"
+		fi
+	fi
+	for i in /sys/bus/usb/devices/* ; do
+		if [ -f $i/idVendor ] && [ `cat $i/idVendor` = $vendor ] ; then
+			for j in $device_list ; do
+				if [ -f $i/idProduct ] && [ `cat $i/idProduct` = $j ] ; then
+					$1 $i $2
+				fi
+			done
+		fi
+	done
+}
+
+if [ $# -ne 2 ] ; then
+	print_help
+fi
+
+case $1 in
+	rebind_to) 	do_all rebind $2 ;;
+	persist)	do_all persist $2 ;;
+	suspend)	do_all susp $2 ;;
+	autosuspend)	do_all autosuspend $2 ;;
+	*)		print_help ;;
+esac
+
+exit

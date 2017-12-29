@@ -18,16 +18,16 @@
 /* get device ID */
 #define CPAD_CGID		_IOR('U', CPAD_IOCTL_BASE+1, struct input_id)
 
-/* reset usb device */
+/* reset usb device (DEPRECATED) */
 #define CPAD_RESET		_IO('U', CPAD_IOCTL_BASE+2)
 
 /* set backlight state */
-#define CPAD_WLIGHT		_IOW('U', CPAD_IOCTL_BASE+3, unsigned char)
+#define CPAD_WLIGHT		_IOW('U', CPAD_IOCTL_BASE+3, u8)
 
 /* set LCD state */
-#define CPAD_WLCD		_IOW('U', CPAD_IOCTL_BASE+5, unsigned char)
+#define CPAD_WLCD		_IOW('U', CPAD_IOCTL_BASE+5, u8)
 
-/* read backlight state */						
+/* read backlight state */
 #define CPAD_RLIGHT		_IO('U', CPAD_IOCTL_BASE+6)
 
 /* read LCD state */
