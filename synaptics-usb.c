@@ -150,7 +150,11 @@ module_param(btn_middle, int, 0644);
 
 static char synusb_input_name[] = "Synaptics USB touchpad";
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+static void synusb_input_callback(struct urb *urb)
+#else
 static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
+#endif
 {
 	struct synusb_context *synusb = (struct synusb_context *)urb->context;
 	unsigned char *data = urb->transfer_buffer;
@@ -189,7 +193,9 @@ static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
 		tool_width = 0;
 	}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
 	input_regs (idev, regs);
+#endif
 
 	if (pressure > 30) input_report_key (idev, BTN_TOUCH, 1);
 	if (pressure < 25) input_report_key (idev, BTN_TOUCH, 0);
@@ -413,7 +419,11 @@ error:
 	return retval;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+static void cpad_in_callback(struct urb *urb)
+#else
 static void cpad_in_callback(struct urb *urb, struct pt_regs *regs)
+#endif
 {
 	struct synusb_context *synusb;
 
@@ -423,7 +433,11 @@ static void cpad_in_callback(struct urb *urb, struct pt_regs *regs)
 	wake_up_interruptible(&synusb->wait);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+static void cpad_out_callback(struct urb *urb)
+#else
 static void cpad_out_callback(struct urb *urb, struct pt_regs *regs)
+#endif
 {
 	struct synusb_context *synusb;
 
@@ -437,7 +451,11 @@ static void cpad_out_callback(struct urb *urb, struct pt_regs *regs)
 		return;
 	err("usb_submit_urb bulk in failed, error %d", synusb->error);
 error:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+	cpad_in_callback(urb);
+#else
 	cpad_in_callback(urb, regs);
+#endif
 }
 
 /* send out and in urbs synchronously */

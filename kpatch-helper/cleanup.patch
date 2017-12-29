@@ -1,6 +1,6 @@
-diff -ruN linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.18-synusb-cleanup/drivers/usb/input/synaptics-usb.c
---- linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c	2006-10-08 14:14:27.000000000 +0200
-+++ linux-2.6.18-synusb-cleanup/drivers/usb/input/synaptics-usb.c	2006-10-08 14:16:10.000000000 +0200
+diff -ruN linux-2.6.19-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.19-synusb-cleanup/drivers/usb/input/synaptics-usb.c
+--- linux-2.6.19-synusb/drivers/usb/input/synaptics-usb.c	2007-01-11 21:32:26.000000000 +0100
++++ linux-2.6.19-synusb-cleanup/drivers/usb/input/synaptics-usb.c	2007-01-11 21:42:00.000000000 +0100
 @@ -22,11 +22,6 @@
   */
  
@@ -28,7 +28,30 @@ diff -ruN linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.18-syn
  #include <linux/input.h>
  #include <linux/moduleparam.h>
  #include <linux/cpad.h>
-@@ -266,11 +255,7 @@
+@@ -150,11 +139,7 @@
+ 
+ static char synusb_input_name[] = "Synaptics USB touchpad";
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+ static void synusb_input_callback(struct urb *urb)
+-#else
+-static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
+-#endif
+ {
+ 	struct synusb_context *synusb = (struct synusb_context *)urb->context;
+ 	unsigned char *data = urb->transfer_buffer;
+@@ -193,10 +178,6 @@
+ 		tool_width = 0;
+ 	}
+ 
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
+-	input_regs (idev, regs);
+-#endif
+-
+ 	if (pressure > 30) input_report_key (idev, BTN_TOUCH, 1);
+ 	if (pressure < 25) input_report_key (idev, BTN_TOUCH, 0);
+ 
+@@ -272,11 +253,7 @@
  	idev->phys = synusb->iphys;
  	idev->name = synusb_input_name;
  	usb_to_input_id(udev, &idev->id);
@@ -40,7 +63,43 @@ diff -ruN linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.18-syn
  
  	input_register_device(idev);
  
-@@ -717,9 +702,6 @@
+@@ -419,11 +396,7 @@
+ 	return retval;
+ }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+ static void cpad_in_callback(struct urb *urb)
+-#else
+-static void cpad_in_callback(struct urb *urb, struct pt_regs *regs)
+-#endif
+ {
+ 	struct synusb_context *synusb;
+ 
+@@ -433,11 +406,7 @@
+ 	wake_up_interruptible(&synusb->wait);
+ }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+ static void cpad_out_callback(struct urb *urb)
+-#else
+-static void cpad_out_callback(struct urb *urb, struct pt_regs *regs)
+-#endif
+ {
+ 	struct synusb_context *synusb;
+ 
+@@ -451,11 +420,7 @@
+ 		return;
+ 	err("usb_submit_urb bulk in failed, error %d", synusb->error);
+ error:
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+ 	cpad_in_callback(urb);
+-#else
+-	cpad_in_callback(urb, regs);
+-#endif
+ }
+ 
+ /* send out and in urbs synchronously */
+@@ -735,9 +700,6 @@
  static struct usb_class_driver cpad_class = {
  	.name =		"usb/cpad%d",
  	.fops =		&cpad_fops,
@@ -50,7 +109,7 @@ diff -ruN linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.18-syn
  	.minor_base =	USB_CPAD_MINOR_BASE,
  };
  
-@@ -957,9 +939,6 @@
+@@ -975,9 +937,6 @@
  }
  
  static struct usb_driver synusb_driver = {
