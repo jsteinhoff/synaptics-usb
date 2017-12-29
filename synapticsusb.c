@@ -387,7 +387,15 @@ static int synusb_setup_endpoints(struct synusb *synusb)
 	return 0;
 }
 
-static void synusb_detect_type(struct synusb *synusb, const struct usb_device_id *id)
+/* disable experimental stick and screen support by default */
+MODULE_PARM_DESC(enable_stick, "enable trackoint support");
+MODULE_PARM_DESC(enable_screen, "enable touchscreen support");
+static int enable_stick = 0;
+static int enable_screen = 0;
+module_param(enable_stick, int, 0444);
+module_param(enable_screen, int, 0444);
+
+static int synusb_detect_type(struct synusb *synusb, const struct usb_device_id *id)
 {
 	int int_num = synusb->interface->cur_altsetting->desc.bInterfaceNumber;
 
@@ -414,6 +422,13 @@ static void synusb_detect_type(struct synusb *synusb, const struct usb_device_id
 	} else {
 		synusb->input_type = SYNUSB_PAD;
 	}
+
+	if ((synusb->input_type == SYNUSB_STICK) && !enable_stick)
+		return -ENODEV;
+	if ((synusb->input_type == SYNUSB_SCREEN) && !enable_screen)
+		return -ENODEV;
+
+	return 0;
 }
 
 void synusb_free_urb(struct urb *urb)
@@ -456,7 +471,8 @@ static int synusb_probe(struct usb_interface *interface, const struct usb_device
 	kref_init(&synusb->kref);
 	usb_set_intfdata(interface, synusb);
 
-	synusb_detect_type(synusb, id);
+	if (synusb_detect_type(synusb, id))
+		goto error;
 
 	retval = synusb_setup_endpoints(synusb);
 	if (retval) {

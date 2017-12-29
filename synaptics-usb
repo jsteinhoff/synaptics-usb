@@ -36,7 +36,7 @@ rebind () {
 			echo -n $interface 2> /dev/null > $ddir/bind
 		else
 			echo "Using old rebind method..."
-			echo "1" 2> /dev/null > $2/module/parameters/rebind
+			echo "1" 2> /dev/null > $ddir/module/parameters/rebind
 		fi
 		if [ ! $idir/driver -ef $ddir ] ; then
 			echo "ERROR: Can not rebind interface $interface"
@@ -44,9 +44,12 @@ rebind () {
 	fi
 }
 
-rebind_stick_to () {
+rebind_stick () {
 	if [ `cat $1/idProduct` = "0009" ] ; then
-		int_num=":2.0"
+		int_num=":1.1"
+	fi
+	if [ $2 = synaptics-usb ] ; then
+		echo "1" > $ddir/module/parameters/enable_stick
 	fi
 	rebind $1 $2
 }
