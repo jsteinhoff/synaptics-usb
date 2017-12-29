@@ -5,14 +5,15 @@
  *  Copyright (c) 2003 Ron Lee (ron@debian.org)
  *	cPad driver for kernel 2.4
  *
- *  Copyright (c) 2004 Jan Steinhoff <jan.steinhoff@uni-jena.de>
+ *  Copyright (c) 2004 Jan Steinhoff (cpad@jan-steinhoff . de)
  *  Copyright (c) 2004 Ron Lee (ron@debian.org)
  *	rewritten for kernel 2.6
- *  cPad character device part now in cpad.c
  *
- * Bases on: 	usb_skeleton.c v2.2 by Greg Kroah-Hartman (greg@kroah.com)
- *		drivers/hid/usbhid/usbmouse.c by Dmitry Torokhov <dtor@mail.ru>
- *		drivers/input/mouse/synaptics.c
+ *  cPad dispaly character device part now in cpad.c
+ *
+ * Bases on: 	usb_skeleton.c v2.2 by Greg Kroah-Hartman
+ *		drivers/hid/usbhid/usbmouse.c by Vojtech Pavlik
+ *		drivers/input/mouse/synaptics.c by Peter Osterlund
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -20,6 +21,25 @@
  * any later version.
  *
  * Trademarks are the property of their respective owners.
+ */
+
+/****
+ * There are three different types of Synaptics USB devices: Touchpads,
+ * touchsticks (or trackpoints), and touchscreens. Touchpads are well supported
+ * by this driver, touchstick support has not been tested much yet, and
+ * touchscreens have not been tested at all. The only difference between pad
+ * and stick seems to be that the x and y finger positions are unsigned 13 bit
+ * integers in the first case, but are signed ones in the second case.
+ *
+ * Up to three alternate settings are possible:
+ *	setting 0: one int endpoint for relative movement (used by usbhid.ko)
+ *	setting 1: one int endpoint for absolute finger position
+ *	setting 2 (cPad only): one int endpoint for absolute finger position and
+ *		   two bulk endpoints for the display (in/out)
+ * This driver uses setting 2 for the cPad and setting 1 for other devices.
+ *
+ * The cPad is an USB touchpad with background display. The display driver part
+ * can be found in cpad.c.
  */
 
 #include "kconfig.h"
@@ -35,7 +55,6 @@
 #include <linux/kref.h>
 #endif
 #include <linux/usb.h>
-#include <linux/mutex.h>
 #include <linux/input.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
 #include <linux/usb/input.h>
@@ -47,14 +66,15 @@
 #include "synapticsusb.h"
 #include "cpad.h"
 
+
 /*
  * input device code
  */
 
-MODULE_PARM_DESC(xmin, "minimal horizontal finger position");
-MODULE_PARM_DESC(xmax, "maximal horizontal finger position");
-MODULE_PARM_DESC(ymin, "minimal vertical finger position");
-MODULE_PARM_DESC(ymax, "maximal vertical finger position");
+MODULE_PARM_DESC(xmin, "minimal horizontal finger position for touchpads");
+MODULE_PARM_DESC(xmax, "maximal horizontal finger position for touchpads");
+MODULE_PARM_DESC(ymin, "minimal vertical finger position for touchpads");
+MODULE_PARM_DESC(ymax, "maximal vertical finger position for touchpads");
 static int xmin = 1472;
 static int xmax = 5472;
 static int ymin = 1408;
@@ -64,7 +84,8 @@ module_param(xmax, int, 0444);
 module_param(ymin, int, 0444);
 module_param(ymax, int, 0444);
 
-MODULE_PARM_DESC(btn_middle, "if set, cPad menu button is reported as middle button");
+MODULE_PARM_DESC(btn_middle, "if set, cPad menu button is reported "
+			     "as a middle button");
 static int btn_middle = 1;
 module_param(btn_middle, int, 0644);
 
@@ -72,7 +93,7 @@ static const char synusb_pad_name[] = "Synaptics USB TouchPad";
 static const char synusb_stick_name[] = "Synaptics USB Styk";
 static const char synusb_screen_name[] = "Synaptics USB TouchScreen";
 
-static const char* synusb_get_name(struct synusb *synusb)
+static const char *synusb_get_name(struct synusb *synusb)
 {
 	switch (synusb->input_type) {
 	case SYNUSB_PAD:
@@ -86,7 +107,7 @@ static const char* synusb_get_name(struct synusb *synusb)
 }
 
 /* report tool_width for touchpads */
-static inline void synusb_report_width(struct input_dev *idev, int pressure, int w)
+static void synusb_report_width(struct input_dev *idev, int pressure, int w)
 {
 	int num_fingers, tool_width;
 
@@ -103,8 +124,7 @@ static inline void synusb_report_width(struct input_dev *idev, int pressure, int
 			tool_width = w;
 			break;
 		}
-	}
-	else {
+	} else {
 		num_fingers = 0;
 		tool_width = 0;
 	}
@@ -117,14 +137,15 @@ static inline void synusb_report_width(struct input_dev *idev, int pressure, int
 }
 
 /* convert signed or unsigned 13 bit number to int */
-static inline int us13_to_int(u8 high, u8 low, int has_sign) {
-        int res;
+static inline int us13_to_int(u8 high, u8 low, int has_sign)
+{
+	int res;
 
-        res = ((int)(high & 0x1f) << 8) | low;
-        if (has_sign && (high & 0x10))
-                res -= 0x2000;
+	res = ((int)(high & 0x1f) << 8) | low;
+	if (has_sign && (high & 0x10))
+		res -= 0x2000;
 
-        return res;
+	return res;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
@@ -141,7 +162,9 @@ static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
 
 	if (urb->status) {
 		if (synusb_urb_status_error(urb)) {
-			err("nonzero read int status received: %d", urb->status);
+			synusb_err(synusb, "nonzero int in status received: %d",
+				   urb->status);
+			/* an error occured, try to resubmit */
 			goto resubmit;
 		}
 
@@ -158,6 +181,7 @@ static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
 	y = us13_to_int(data[4], data[5], is_stick);
 
 	if (is_stick) {
+		y = -y;
 		if (pressure > 6)
 			input_report_key(idev, BTN_TOUCH, 1);
 		if (pressure < 5)
@@ -182,13 +206,15 @@ static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
 	input_report_key(idev, BTN_RIGHT, data[1] & 0x01);
 	input_report_key(idev, BTN_MIDDLE, data[1] & 0x02);
 	if (synusb->has_display)
-		input_report_key(idev, btn_middle ? BTN_MIDDLE : BTN_MISC, data[1] & 0x08);
+		input_report_key(idev, btn_middle ? BTN_MIDDLE : BTN_MISC,
+				 data[1] & 0x08);
 
 	input_sync(idev);
 resubmit:
 	res = usb_submit_urb(urb, GFP_ATOMIC);
 	if (res)
-		err("usb_submit_urb int in failed with result %d", res);
+		synusb_err(synusb, "submit int in urb failed with result %d",
+			   res);
 }
 
 /* Data must always be fetched from the int endpoint, otherwise the device
@@ -205,7 +231,8 @@ static void synusb_submit_int(struct work_struct *work)
 
 	res = usb_submit_urb(synusb->iurb, GFP_KERNEL);
 	if (res)
-		err ("usb_submit_urb int in failed with result %d", res);
+		synusb_err(synusb, "submit int in urb failed with result %d",
+			   res);
 }
 
 static int synusb_init_input(struct synusb *synusb)
@@ -216,34 +243,34 @@ static int synusb_init_input(struct synusb *synusb)
 	int retval = -ENOMEM;
 
 	idev = input_allocate_device();
-	if (!idev) {
-		err("Can not allocate input device");
+	if (idev == NULL) {
+		synusb_err(synusb, "Can not allocate input device");
 		goto error;
 	}
 
-	set_bit(EV_ABS, idev->evbit);
-	set_bit(EV_KEY, idev->evbit);
+	__set_bit(EV_ABS, idev->evbit);
+	__set_bit(EV_KEY, idev->evbit);
 
 	if (is_stick) {
-		input_set_abs_params(idev, ABS_X, -127, 127, 0, 0);
-		input_set_abs_params(idev, ABS_Y, -127, 127, 0, 0);
-		input_set_abs_params(idev, ABS_PRESSURE, 0, 16, 0, 0);
+		input_set_abs_params(idev, ABS_X, -512, 512, 0, 0);
+		input_set_abs_params(idev, ABS_Y, -512, 512, 0, 0);
+		input_set_abs_params(idev, ABS_PRESSURE, 0, 127, 0, 0);
 	} else {
 		input_set_abs_params(idev, ABS_X, xmin, xmax, 0, 0);
 		input_set_abs_params(idev, ABS_Y, ymin, ymax, 0, 0);
 		input_set_abs_params(idev, ABS_PRESSURE, 0, 255, 0, 0);
 		input_set_abs_params(idev, ABS_TOOL_WIDTH, 0, 15, 0, 0);
-		set_bit(BTN_TOOL_DOUBLETAP, idev->keybit);
-		set_bit(BTN_TOOL_TRIPLETAP, idev->keybit);
+		__set_bit(BTN_TOOL_DOUBLETAP, idev->keybit);
+		__set_bit(BTN_TOOL_TRIPLETAP, idev->keybit);
 	}
 
-	set_bit(BTN_TOUCH, idev->keybit);
-	set_bit(BTN_TOOL_FINGER, idev->keybit);
-	set_bit(BTN_LEFT, idev->keybit);
-	set_bit(BTN_RIGHT, idev->keybit);
-	set_bit(BTN_MIDDLE, idev->keybit);
+	__set_bit(BTN_TOUCH, idev->keybit);
+	__set_bit(BTN_TOOL_FINGER, idev->keybit);
+	__set_bit(BTN_LEFT, idev->keybit);
+	__set_bit(BTN_RIGHT, idev->keybit);
+	__set_bit(BTN_MIDDLE, idev->keybit);
 	if (synusb->has_display)
-		set_bit(BTN_MISC, idev->keybit);
+		__set_bit(BTN_MISC, idev->keybit);
 
 	usb_make_path(udev, synusb->iphys, sizeof(synusb->iphys));
 	strlcat(synusb->iphys, "/input0", sizeof(synusb->iphys));
@@ -262,7 +289,7 @@ static int synusb_init_input(struct synusb *synusb)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22)
 	retval = input_register_device(idev);
 	if (retval) {
-		err("Can not register input device");
+		synusb_err(synusb, "Can not register input device");
 		goto error;
 	}
 #else
@@ -270,7 +297,9 @@ static int synusb_init_input(struct synusb *synusb)
 #endif
 	synusb->idev = idev;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 	synusb->interface->needs_remote_wakeup = 1;
+#endif
 
 	return 0;
 error:
@@ -285,22 +314,24 @@ error:
  * initialization of usb data structures
  */
 
-static int synusb_setup_iurb(struct synusb *synusb, struct usb_endpoint_descriptor *endpoint)
+static int synusb_setup_iurb(struct synusb *synusb,
+			     struct usb_endpoint_descriptor *endpoint)
 {
 	char *buf;
 
 	if (endpoint->wMaxPacketSize < 8)
 		return 0;
 	if (synusb->iurb) {
-		pr_warning("More than one possible int in endpoint found.\n");
+		synusb_warn(synusb, "Found more than one possible "
+				    "int in endpoint");
 		return 0;
 	}
 	synusb->iurb = usb_alloc_urb(0, GFP_KERNEL);
-	if (!synusb->iurb)
+	if (synusb->iurb == NULL)
 		return -ENOMEM;
 	buf = usb_buffer_alloc(synusb->udev, 8, GFP_ATOMIC,
 			       &synusb->iurb->transfer_dma);
-	if (!buf)
+	if (buf == NULL)
 		return -ENOMEM;
 	usb_fill_int_urb(synusb->iurb, synusb->udev,
 			 usb_rcvintpipe(synusb->udev,
@@ -323,7 +354,7 @@ static struct synusb_endpoint_table {
 	__u8 xfer_type;
 	int  (*setup)(struct synusb *,
 		      struct usb_endpoint_descriptor *);
-} synusb_endpoints [] = {
+} synusb_endpoints[] = {
 	{ USB_DIR_IN,	USB_ENDPOINT_XFER_BULK,	cpad_setup_in },
 	{ USB_DIR_OUT,	USB_ENDPOINT_XFER_BULK,	cpad_setup_out },
 	{ USB_DIR_IN,	USB_ENDPOINT_XFER_INT,	synusb_setup_iurb },
@@ -335,11 +366,11 @@ static inline int synusb_match_endpoint(struct usb_endpoint_descriptor *ep)
 {
 	int i;
 
-	for (i=0; synusb_endpoints[i].setup; i++)
-		if (( (ep->bEndpointAddress & USB_DIR_IN)
-				== synusb_endpoints[i].dir		) &&
-		    ( (ep->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK)
-				== synusb_endpoints[i].xfer_type	))
+	for (i = 0; synusb_endpoints[i].setup; i++)
+		if (((ep->bEndpointAddress & USB_DIR_IN)
+				== synusb_endpoints[i].dir) &&
+		    ((ep->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK)
+				== synusb_endpoints[i].xfer_type))
 			return i;
 	return -ENODEV;
 }
@@ -356,15 +387,18 @@ static int synusb_setup_endpoints(struct synusb *synusb)
 			 synusb->interface->num_altsetting);
 	res = usb_set_interface(synusb->udev, int_num, altsetting);
 	if (res) {
-		err("Can not set alternate setting to %i, error: %i",
-		    altsetting, res);
+		synusb_err(synusb, "Can not set alternate setting to %i, "
+				   "error: %i", altsetting, res);
 		return res;
 	}
 
+	/* allocate synusb->display, if the device has a display */
 	res = cpad_alloc(synusb);
 	if (res)
 		return res;
 
+	/* go through all endpoints and call the setup function
+	 * listed in synusb_endpoint_table */
 	iface_desc = synusb->interface->cur_altsetting;
 	for (i = 0; i < iface_desc->desc.bNumEndpoints; i++) {
 		endpoint = &iface_desc->endpoint[i].desc;
@@ -376,10 +410,10 @@ static int synusb_setup_endpoints(struct synusb *synusb)
 		}
 	}
 
+	/* check whether all possible endpoints have been set up */
 	res = synusb_check_int_setup(synusb);
 	if (res)
 		return res;
-
 	res = cpad_check_setup(synusb);
 	if (res)
 		return res;
@@ -387,15 +421,13 @@ static int synusb_setup_endpoints(struct synusb *synusb)
 	return 0;
 }
 
-/* disable experimental stick and screen support by default */
-MODULE_PARM_DESC(enable_stick, "enable trackoint support");
-MODULE_PARM_DESC(enable_screen, "enable touchscreen support");
-static int enable_stick = 0;
-static int enable_screen = 0;
+/* disable experimental stick support by default */
+MODULE_PARM_DESC(enable_stick, "enable trackpoint support");
+static int enable_stick;
 module_param(enable_stick, int, 0644);
-module_param(enable_screen, int, 0644);
 
-static int synusb_detect_type(struct synusb *synusb, const struct usb_device_id *id)
+static int synusb_detect_type(struct synusb *synusb,
+			      const struct usb_device_id *id)
 {
 	int int_num = synusb->interface->cur_altsetting->desc.bInterfaceNumber;
 
@@ -425,15 +457,16 @@ static int synusb_detect_type(struct synusb *synusb, const struct usb_device_id 
 
 	if ((synusb->input_type == SYNUSB_STICK) && !enable_stick)
 		return -ENODEV;
-	if ((synusb->input_type == SYNUSB_SCREEN) && !enable_screen)
-		return -ENODEV;
+	if (synusb->input_type == SYNUSB_SCREEN)
+		synusb_warn(synusb, "driver has not been tested "
+				    "with touchscreens!");
 
 	return 0;
 }
 
 void synusb_free_urb(struct urb *urb)
 {
-	if (!urb)
+	if (urb == NULL)
 		return;
 	usb_buffer_free(urb->dev, urb->transfer_buffer_length,
 			urb->transfer_buffer, urb->transfer_dma);
@@ -454,7 +487,8 @@ void synusb_delete(struct kref *kref)
 	kfree(synusb);
 }
 
-static int synusb_probe(struct usb_interface *interface, const struct usb_device_id *id)
+static int synusb_probe(struct usb_interface *interface,
+			const struct usb_device_id *id)
 {
 	struct synusb *synusb = NULL;
 	struct usb_device *udev = interface_to_usbdev(interface);
@@ -462,7 +496,7 @@ static int synusb_probe(struct usb_interface *interface, const struct usb_device
 
 	synusb = kzalloc(sizeof(*synusb), GFP_KERNEL);
 	if (synusb == NULL) {
-		err("Out of memory");
+		dev_err(&interface->dev, "Out of memory in synusb_probe\n");
 		goto error;
 	}
 
@@ -476,7 +510,8 @@ static int synusb_probe(struct usb_interface *interface, const struct usb_device
 
 	retval = synusb_setup_endpoints(synusb);
 	if (retval) {
-		err("Can not set up endpoints, error: %i", retval);
+		synusb_err(synusb, "Can not set up endpoints, error: %i",
+			   retval);
 		goto error;
 	}
 
@@ -488,8 +523,9 @@ static int synusb_probe(struct usb_interface *interface, const struct usb_device
 	if (retval)
 		goto error;
 
+	/* submit the int in urb */
 	INIT_DELAYED_WORK(&synusb->isubmit, synusb_submit_int);
-	schedule_delayed_work(&synusb->isubmit, HZ/100);
+	schedule_delayed_work(&synusb->isubmit, msecs_to_jiffies(10));
 
 	return 0;
 
@@ -518,7 +554,7 @@ static void synusb_disconnect(struct usb_interface *interface)
 
 	kref_put(&synusb->kref, synusb_delete);
 
-	pr_info("Synaptics device disconnected.\n");
+	dev_info(&interface->dev, "Synaptics device disconnected\n");
 }
 
 
@@ -526,20 +562,22 @@ static void synusb_disconnect(struct usb_interface *interface)
  * suspend code
  */
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
-
 static void synusb_draw_down(struct synusb *synusb)
 {
 	cancel_delayed_work_sync(&synusb->isubmit);
 	usb_kill_urb(synusb->iurb);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,12)
 static int synusb_suspend(struct usb_interface *intf, pm_message_t message)
+#else
+static int synusb_suspend(struct usb_interface *intf, u32 state)
+#endif
 {
 	struct synusb *synusb = usb_get_intfdata(intf);
 	int res;
 
-	if (!synusb)
+	if (synusb == NULL)
 		return 0;
 
 	res = cpad_suspend(synusb);
@@ -558,7 +596,8 @@ static int synusb_resume(struct usb_interface *intf)
 
 	res = usb_submit_urb(synusb->iurb, GFP_ATOMIC);
 	if (res) {
-		err("usb_submit_urb int in failed during resume with result %d", res);
+		synusb_err(synusb, "submit int in urb failed during resume "
+				   "with result %d", res);
 		goto error;
 	}
 
@@ -569,25 +608,13 @@ error:
 	return res;
 }
 
-static int synusb_reset_resume(struct usb_interface *intf)
-{
-	struct synusb *synusb = usb_get_intfdata(intf);
-	int res;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
 
-	res = usb_submit_urb(synusb->iurb, GFP_ATOMIC);
-	if (res) {
-		err("usb_submit_urb int in failed during resume with result %d", res);
-		goto error;
-	}
-
-	res = cpad_reset_resume(synusb);
-	if (res)
-		synusb_draw_down(synusb);
-error:
-	return res;
-}
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
 static int synusb_pre_reset(struct usb_interface *intf)
+#else
+static void synusb_pre_reset(struct usb_interface *intf)
+#endif
 {
 	struct synusb *synusb = usb_get_intfdata(intf);
 	int res;
@@ -601,14 +628,19 @@ error:
 	return res;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
 static int synusb_post_reset(struct usb_interface *intf)
+#else
+static void synusb_post_reset(struct usb_interface *intf)
+#endif
 {
 	struct synusb *synusb = usb_get_intfdata(intf);
 	int res;
 
 	res = usb_submit_urb(synusb->iurb, GFP_ATOMIC);
 	if (res) {
-		err("usb_submit_urb int in failed during post_reset with result %d", res);
+		synusb_err(synusb, "submit int in urb failed in during "
+				   "post_reset with result %d", res);
 		goto error;
 	}
 
@@ -619,10 +651,33 @@ error:
 	return res;
 }
 
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18) */
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+
+static int synusb_reset_resume(struct usb_interface *intf)
+{
+	struct synusb *synusb = usb_get_intfdata(intf);
+	int res;
+
+	res = usb_submit_urb(synusb->iurb, GFP_ATOMIC);
+	if (res) {
+		synusb_err(synusb, "submit int in urb failed during "
+				   "reset-resume with result %d", res);
+		goto error;
+	}
+
+	res = cpad_reset_resume(synusb);
+	if (res)
+		synusb_draw_down(synusb);
+error:
+	return res;
+}
+
 #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23) */
 
 /* the id table is filled via sysfs, so usbhid is always the default driver */
-static struct usb_device_id synusb_idtable [] = {
+static struct usb_device_id synusb_idtable[] = {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
 	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_TP) },
 	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_INT_TP) },
@@ -636,24 +691,28 @@ static struct usb_device_id synusb_idtable [] = {
 #endif
 	{ }
 };
-MODULE_DEVICE_TABLE (usb, synusb_idtable);
+MODULE_DEVICE_TABLE(usb, synusb_idtable);
 
 struct usb_driver synusb_driver = {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
 	.owner =	THIS_MODULE,
 #endif
-	.name =		"synaptics-usb",
+	.name =		"synaptics_usb",
 	.probe =	synusb_probe,
 	.disconnect =	synusb_disconnect,
 	.id_table =	synusb_idtable,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
 	.suspend =	synusb_suspend,
 	.resume =	synusb_resume,
-	.reset_resume = synusb_reset_resume,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
 	.pre_reset =	synusb_pre_reset,
 	.post_reset =	synusb_post_reset,
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18) */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+	.reset_resume = synusb_reset_resume,
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 	.supports_autosuspend = 1,
-#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23) */
+#endif
 };
 
 static int __init synusb_init(void)

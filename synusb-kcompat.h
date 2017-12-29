@@ -1,6 +1,7 @@
 #ifndef _SYNUSB_KCOMPAT_H
 #define _SYNUSB_KCOMPAT_H
 
+#include <linux/kernel.h>
 #include <linux/version.h>
 #include <linux/usb.h>
 #include <linux/input.h>
@@ -12,17 +13,12 @@
 #include "kconfig.h"
 
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23)
+/*#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
 
-struct usb_anchor { };
+#define pr_warning(fmt, ...) \
+        printk(KERN_WARNING fmt, ##__VA_ARGS__)
 
-static inline void init_usb_anchor(struct usb_anchor *anchor) { }
-
-static inline void usb_kill_anchored_urbs(struct usb_anchor *anchor) { }
-static inline void usb_anchor_urb(struct urb *urb, struct usb_anchor *anchor) { }
-static inline void usb_unanchor_urb(struct urb *urb) { }
-
-#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23) */
+#endif */ /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24) */
 
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
@@ -37,6 +33,56 @@ struct delayed_work {
 #define cancel_delayed_work(_work) cancel_delayed_work(&(_work)->work)
 
 #endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20) */
+
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23)
+
+static inline int cancel_delayed_work_sync(struct delayed_work *work) {
+	cancel_delayed_work(work);
+	flush_scheduled_work();
+	return 1;
+}
+
+#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23) */
+
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
+
+static inline int usb_autopm_get_interface(struct usb_interface *intf) { return 0; }
+static inline void usb_autopm_put_interface(struct usb_interface *intf) { }
+
+#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19) */
+
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
+
+#include <asm/semaphore.h>
+
+struct mutex {
+	struct semaphore sem;
+};
+
+static inline void mutex_init(struct mutex *lock) {
+	init_MUTEX(&lock->sem);
+}
+
+static inline void mutex_lock(struct mutex *lock) {
+	down(&lock->sem);
+}
+
+static inline int mutex_lock_interruptible(struct mutex *lock) {
+	return down_interruptible(&lock->sem);
+}
+
+static inline int mutex_trylock(struct mutex *lock) {
+	return !down_trylock(&lock->sem);
+}
+
+static inline void mutex_unlock(struct mutex *lock) {
+	up(&lock->sem);
+}
+
+#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16) */
 
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
@@ -74,8 +120,8 @@ static inline void input_free_device(struct input_dev *dev)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
 
-#define usb_lock_device(dev) down(&dev->serialize)
-#define usb_unlock_device(dev) up(&dev->serialize)
+#define usb_lock_device(dev) down(&(dev)->serialize)
+#define usb_unlock_device(dev) up(&(dev)->serialize)
 
 /*static int driver_probe_device(struct device_driver * drv, struct device * dev)
 {
@@ -97,7 +143,7 @@ static inline void input_free_device(struct input_dev *dev)
 
 #endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10) */
 
-static struct usb_driver synusb_driver;
+extern struct usb_driver synusb_driver;
 static struct usb_device_id synusb_idtable [];
 
 static void repossess_devices( struct usb_driver *driver, struct usb_device_id *id )
@@ -154,8 +200,7 @@ static int synusb_set_rebind(const char *val, struct kernel_param *kp)
 
 module_param_call(rebind, synusb_set_rebind, param_get_int, &rebind, 0664);
 
-static inline void
-usb_to_input_id(const struct usb_device *dev, struct input_id *id)
+static inline void usb_to_input_id(const struct usb_device *dev, struct input_id *id)
 {
 	id->bustype = BUS_USB;
 	id->vendor = le16_to_cpu(dev->descriptor.idVendor);
@@ -164,6 +209,16 @@ usb_to_input_id(const struct usb_device *dev, struct input_id *id)
 }
 
 #endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,13) */
+
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,11)
+
+static inline unsigned long wait_for_completion_interruptible_timeout(struct completion *x, unsigned long timeout) {
+	wait_for_completion(x);
+	return 1;
+}
+
+#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,11) */
 
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,8)

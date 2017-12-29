@@ -13,10 +13,14 @@ leave ()
 	exit $1
 }
 
-if [ $VCODE -ge 132623 ] ; then
-	BASE_PATCH=2.6.15-base.patch
+if [ $VCODE -ge 132639 ] ; then
+	BASE_PATCH=2.6.31-base.patch
+elif [ $VCODE -ge 132638 ] ; then
+	BASE_PATCH=2.6.30-base.patch
+elif [ $VCODE -ge 132637 ] ; then
+	BASE_PATCH=2.6.29-base.patch
 else
-	BASE_PATCH=2.6.0-base.patch
+	BASE_PATCH=base.patch
 fi
 
 rm -rf tmp
@@ -26,22 +30,26 @@ cd tmp
 mkdir linux-$KVER
 cd linux-$KVER
 mkdir drivers
-mkdir drivers/usb
-mkdir drivers/usb/input
-cp $KSRC/drivers/usb/input/Makefile drivers/usb/input
-cp $KSRC/drivers/usb/input/Kconfig drivers/usb/input
+mkdir drivers/input
+mkdir drivers/input/mouse
+cp $KSRC/drivers/input/mouse/Makefile drivers/input/mouse
+cp $KSRC/drivers/input/mouse/Kconfig drivers/input/mouse
 cd ..
 
 cp -r linux-$KVER linux-$KVER-synusb
 cd linux-$KVER-synusb
+#echo Press return to continue...; read
 patch -p1 --no-backup-if-mismatch -i ../../$BASE_PATCH || leave 1
 mkdir include
 mkdir include/linux
-cp ../../../synaptics-usb.c drivers/usb/input
-cp ../../../cpad.h include/linux
+cp ../../../synapticsusb.c drivers/input/mouse
+cp ../../../synapticsusb.h drivers/input/mouse
+cp ../../../cpad.c drivers/input/mouse
+cp ../../../cpad.h drivers/input/mouse
+cp ../../../linux/cpad.h include/linux
 #echo Press return to continue...; read
-if [ $VCODE -le 132627 ] ; then
-	cp ../../../synusb-kcompat.h drivers/usb/input
+if [ $VCODE -le 132631 ] ; then
+	cp ../../../synusb-kcompat.h drivers/input/mouse
 else
 	patch -p1 --no-backup-if-mismatch -i ../../cleanup.patch || leave 1
 fi

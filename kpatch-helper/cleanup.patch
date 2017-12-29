@@ -1,81 +1,37 @@
-diff -ruN linux-2.6.20-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.20-synusb-cleanup/drivers/usb/input/synaptics-usb.c
---- linux-2.6.20-synusb/drivers/usb/input/synaptics-usb.c	2007-03-12 16:19:51.000000000 +0100
-+++ linux-2.6.20-synusb-cleanup/drivers/usb/input/synaptics-usb.c	2007-03-12 16:25:51.000000000 +0100
-@@ -32,11 +32,6 @@
-  * check coding style and comments
+diff -ruN linux-2.6.33-rc3-git3-synusb/drivers/input/mouse/cpad.c linux-2.6.33-rc3-git3-synusb-cleanup/drivers/input/mouse/cpad.c
+--- linux-2.6.33-rc3-git3-synusb/drivers/input/mouse/cpad.c	2010-01-11 01:10:16.446379970 +0100
++++ linux-2.6.33-rc3-git3-synusb-cleanup/drivers/input/mouse/cpad.c	2010-01-11 01:14:12.327382520 +0100
+@@ -55,29 +55,15 @@
+  * from the character device.
   */
  
+-#include "kconfig.h"
+-
+-#ifdef CONFIG_MOUSE_SYNAPTICS_CPADDEV
+-
 -#include "synusb-kcompat.h"
 -
--#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,15)
--#include <linux/config.h>
--#endif
  #include <linux/kernel.h>
  #include <linux/errno.h>
- #include <linux/init.h>
-@@ -44,14 +39,8 @@
+ #include <linux/slab.h>
  #include <linux/module.h>
- #include <asm/uaccess.h>
- #include <linux/usb.h>
--#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
- #include <linux/usb/input.h>
--#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
--#include <linux/usb_input.h>
--#endif
+ #include <linux/moduleparam.h>
 -#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,5)
  #include <linux/kref.h>
 -#endif
- #include <linux/input.h>
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
+ #include <linux/uaccess.h>
+-#else
+-#include <asm/uaccess.h>
+-#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18) */
+ #include <linux/usb.h>
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,16)
+ #include <linux/mutex.h>
+-#endif
+ #include <linux/completion.h>
  #include <linux/workqueue.h>
- #include <linux/moduleparam.h>
-@@ -160,11 +149,7 @@
- 
- static char synusb_input_name[] = "Synaptics USB touchpad";
- 
--#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
- static void synusb_input_callback(struct urb *urb)
--#else
--static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
--#endif
- {
- 	struct synusb *synusb = (struct synusb *)urb->context;
- 	unsigned char *data = urb->transfer_buffer;
-@@ -203,10 +188,6 @@
- 		tool_width = 0;
- 	}
- 
--#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
--	input_regs (idev, regs);
--#endif
--
- 	if (pressure > 30) input_report_key (idev, BTN_TOUCH, 1);
- 	if (pressure < 25) input_report_key (idev, BTN_TOUCH, 0);
- 
-@@ -236,11 +217,7 @@
- /* data must always be fetched from the int endpoint, otherwise the touchpad
-  * would reconnect to force driver reload, so this is always scheduled by probe
-  */
--#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
--static void synusb_submit_int(void *work)
--#else
- static void synusb_submit_int(struct work_struct *work)
--#endif
- {
- 	struct synusb *synusb = container_of(work, struct synusb, isubmit.work);
- 	int res;
-@@ -286,11 +263,7 @@
- 	idev->phys = synusb->iphys;
- 	idev->name = synusb_input_name;
- 	usb_to_input_id(udev, &idev->id);
--#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,15)
- 	idev->cdev.dev = &synusb->interface->dev;
--#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,2)
--	idev->dev = &synusb->interface->dev;
--#endif
- 
- 	input_register_device(idev);
- 
-@@ -433,11 +406,7 @@
+ #include <linux/cpad.h>
+@@ -121,11 +107,7 @@
  	return retval;
  }
  
@@ -85,10 +41,10 @@ diff -ruN linux-2.6.20-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.20-syn
 -static void cpad_in_callback(struct urb *urb, struct pt_regs *regs)
 -#endif
  {
- 	struct synusb *synusb;
+ 	struct cpad_urb *curb = (struct cpad_urb *)urb->context;
  
-@@ -447,11 +416,7 @@
- 	wake_up_interruptible(&synusb->wait);
+@@ -136,11 +118,7 @@
+ 	complete(&curb->display->done);
  }
  
 -#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
@@ -97,33 +53,33 @@ diff -ruN linux-2.6.20-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.20-syn
 -static void cpad_out_callback(struct urb *urb, struct pt_regs *regs)
 -#endif
  {
- 	struct synusb *synusb;
+ 	struct cpad_urb *curb = (struct cpad_urb *)urb->context;
+ 	struct syndisplay *display = curb->display;
+@@ -406,11 +384,7 @@
+ 	return 0;
+ }
  
-@@ -465,11 +430,7 @@
- 		return;
- 	err("usb_submit_urb bulk in failed, error %d", synusb->error);
- error:
--#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
- 	cpad_in_callback(urb);
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
+ static int cpad_flush(struct file *file, fl_owner_t id)
 -#else
--	cpad_in_callback(urb, regs);
+-static int cpad_flush(struct file *file)
 -#endif
+ {
+ 	struct syndisplay *display;
+ 	int res;
+@@ -550,11 +524,7 @@
  }
  
- /* send out and in urbs synchronously */
-@@ -620,11 +581,7 @@
- 	return retval;
- }
- 
+ /* this function is scheduled as a delayed_work, initiated in cpad_flash */
 -#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
 -static void cpad_light_off(void *work)
 -#else
  static void cpad_light_off(struct work_struct *work)
 -#endif
  {
- 	struct synusb *synusb = container_of(work, struct synusb, flash.work);
- 
-@@ -751,9 +708,6 @@
+ 	struct syndisplay *display = container_of(work, struct syndisplay,
+ 						  flash.work);
+@@ -699,9 +669,6 @@
  static struct usb_class_driver cpad_class = {
  	.name =		"usb/cpad%d",
  	.fops =		&cpad_fops,
@@ -133,13 +89,267 @@ diff -ruN linux-2.6.20-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.20-syn
  	.minor_base =	USB_CPAD_MINOR_BASE,
  };
  
-@@ -991,9 +945,6 @@
+@@ -910,8 +877,6 @@
+ 	return 0;
  }
  
- static struct usb_driver synusb_driver = {
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
+-
+ /* set cPad status variables for a reset */
+ static inline void cpad_set_reset(struct syndisplay *display)
+ {
+@@ -953,10 +918,6 @@
+ 	return 0;
+ }
+ 
+-#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18) */
+-
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+-
+ int cpad_reset_resume(struct synusb *synusb)
+ {
+ 	struct syndisplay *display = synusb->display;
+@@ -971,7 +932,3 @@
+ 
+ 	return 0;
+ }
+-
+-#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23) */
+-
+-#endif /* CONFIG_MOUSE_SYNAPTICS_CPADDEV */
+diff -ruN linux-2.6.33-rc3-git3-synusb/drivers/input/mouse/cpad.h linux-2.6.33-rc3-git3-synusb-cleanup/drivers/input/mouse/cpad.h
+--- linux-2.6.33-rc3-git3-synusb/drivers/input/mouse/cpad.h	2010-01-11 01:10:16.448379666 +0100
++++ linux-2.6.33-rc3-git3-synusb-cleanup/drivers/input/mouse/cpad.h	2010-01-11 01:12:26.116376308 +0100
+@@ -1,14 +1,10 @@
+ #ifndef _CPAD_H
+ #define _CPAD_H
+ 
+-#include "kconfig.h"
+-
+ #ifdef CONFIG_MOUSE_SYNAPTICS_CPADDEV
+ 
+ #include <linux/usb.h>
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,16)
+ #include <linux/mutex.h>
+-#endif
+ #include <linux/completion.h>
+ #include <linux/workqueue.h>
+ 
+@@ -100,13 +96,9 @@
+ 
+ int cpad_suspend(struct synusb *);
+ int cpad_resume(struct synusb *);
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
+ int cpad_pre_reset(struct synusb *);
+ int cpad_post_reset(struct synusb *);
+-#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18) */
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+ int cpad_reset_resume(struct synusb *);
+-#endif
+ 
+ #else /* CONFIG_MOUSE_SYNAPTICS_CPADDEV */
+ 
+@@ -126,13 +118,9 @@
+ 
+ int cpad_suspend(struct synusb *synusb) { return 0; }
+ int cpad_resume(struct synusb *synusb) { return 0; }
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
+ int cpad_pre_reset(struct synusb *synusb) { return 0; }
+ int cpad_post_reset(struct synusb *synusb) { return 0; }
+-#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18) */
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+ int cpad_reset_resume(struct synusb *synusb) { return 0; }
+-#endif
+ 
+ #endif /* CONFIG_MOUSE_SYNAPTICS_CPADDEV */
+ 
+diff -ruN linux-2.6.33-rc3-git3-synusb/drivers/input/mouse/synapticsusb.c linux-2.6.33-rc3-git3-synusb-cleanup/drivers/input/mouse/synapticsusb.c
+--- linux-2.6.33-rc3-git3-synusb/drivers/input/mouse/synapticsusb.c	2010-01-11 01:10:16.442380855 +0100
++++ linux-2.6.33-rc3-git3-synusb-cleanup/drivers/input/mouse/synapticsusb.c	2010-01-11 01:15:38.539375489 +0100
+@@ -42,25 +42,16 @@
+  * can be found in cpad.c.
+  */
+ 
+-#include "kconfig.h"
+-#include "synusb-kcompat.h"
+-
+ #include <linux/kernel.h>
+ #include <linux/errno.h>
+ #include <linux/init.h>
+ #include <linux/slab.h>
+ #include <linux/module.h>
+ #include <linux/moduleparam.h>
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,5)
+ #include <linux/kref.h>
+-#endif
+ #include <linux/usb.h>
+ #include <linux/input.h>
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
+ #include <linux/usb/input.h>
+-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
+-#include <linux/usb_input.h>
+-#endif
+ #include <linux/workqueue.h>
+ 
+ #include "synapticsusb.h"
+@@ -148,11 +139,7 @@
+ 	return res;
+ }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+ static void synusb_input_callback(struct urb *urb)
+-#else
+-static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
+-#endif
+ {
+ 	struct synusb *synusb = (struct synusb *)urb->context;
+ 	u8 *data = urb->transfer_buffer;
+@@ -171,10 +158,6 @@
+ 		return;
+ 	}
+ 
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
+-	input_regs(idev, regs);
+-#endif
+-
+ 	pressure = data[6];
+ 	x = us13_to_int(data[2], data[3], is_stick);
+ 	y = us13_to_int(data[4], data[5], is_stick);
+@@ -218,11 +201,7 @@
+ /* Data must always be fetched from the int endpoint, otherwise the device
+  * would reconnect to force driver reload. So this is always scheduled by probe.
+  */
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
+-static void synusb_submit_int(void *work)
+-#else
+ static void synusb_submit_int(struct work_struct *work)
+-#endif
+ {
+ 	struct synusb *synusb = container_of(work, struct synusb, isubmit.work);
+ 	int res;
+@@ -275,29 +254,17 @@
+ 	idev->phys = synusb->iphys;
+ 	idev->name = synusb_get_name(synusb);
+ 	usb_to_input_id(udev, &idev->id);
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22)
+ 	idev->dev.parent = &synusb->interface->dev;
+ 	input_set_drvdata(idev, synusb);
+-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,15)
+-	idev->cdev.dev = &synusb->interface->dev;
+-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,2)
+-	idev->dev = &synusb->interface->dev;
+-#endif
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22)
+ 	retval = input_register_device(idev);
+ 	if (retval) {
+ 		synusb_err(synusb, "Can not register input device");
+ 		goto error;
+ 	}
+-#else
+-	input_register_device(idev);
+-#endif
+ 	synusb->idev = idev;
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+ 	synusb->interface->needs_remote_wakeup = 1;
+-#endif
+ 
+ 	return 0;
+ error:
+@@ -566,11 +533,7 @@
+ 	usb_kill_urb(synusb->iurb);
+ }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,12)
+ static int synusb_suspend(struct usb_interface *intf, pm_message_t message)
+-#else
+-static int synusb_suspend(struct usb_interface *intf, u32 state)
+-#endif
+ {
+ 	struct synusb *synusb = usb_get_intfdata(intf);
+ 	int res;
+@@ -606,13 +569,7 @@
+ 	return res;
+ }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
+-
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+ static int synusb_pre_reset(struct usb_interface *intf)
+-#else
+-static void synusb_pre_reset(struct usb_interface *intf)
+-#endif
+ {
+ 	struct synusb *synusb = usb_get_intfdata(intf);
+ 	int res;
+@@ -626,11 +583,7 @@
+ 	return res;
+ }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+ static int synusb_post_reset(struct usb_interface *intf)
+-#else
+-static void synusb_post_reset(struct usb_interface *intf)
+-#endif
+ {
+ 	struct synusb *synusb = usb_get_intfdata(intf);
+ 	int res;
+@@ -649,10 +602,6 @@
+ 	return res;
+ }
+ 
+-#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18) */
+-
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+-
+ static int synusb_reset_resume(struct usb_interface *intf)
+ {
+ 	struct synusb *synusb = usb_get_intfdata(intf);
+@@ -672,45 +621,21 @@
+ 	return res;
+ }
+ 
+-#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23) */
+-
+ /* the id table is filled via sysfs, so usbhid is always the default driver */
+-static struct usb_device_id synusb_idtable[] = {
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
+-	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_TP) },
+-	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_INT_TP) },
+-	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_CPAD) },
+-	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_TS) },
+-	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_STICK) },
+-	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_WP) },
+-	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_COMP_TP) },
+-	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_WTP) },
+-	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_DP) },
+-#endif
+-	{ }
+-};
++static struct usb_device_id synusb_idtable[] = { { } };
+ MODULE_DEVICE_TABLE(usb, synusb_idtable);
+ 
+ struct usb_driver synusb_driver = {
 -#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
 -	.owner =	THIS_MODULE,
 -#endif
- 	.name =		"synaptics-usb",
+ 	.name =		"synaptics_usb",
  	.probe =	synusb_probe,
  	.disconnect =	synusb_disconnect,
+ 	.id_table =	synusb_idtable,
+ 	.suspend =	synusb_suspend,
+ 	.resume =	synusb_resume,
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
+ 	.pre_reset =	synusb_pre_reset,
+ 	.post_reset =	synusb_post_reset,
+-#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18) */
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+ 	.reset_resume = synusb_reset_resume,
+-#endif
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+ 	.supports_autosuspend = 1,
+-#endif
+ };
+ 
+ static int __init synusb_init(void)

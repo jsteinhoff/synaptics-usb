@@ -56,13 +56,13 @@
  *	The information is only accessible until the next write access.
  */
 
-/* Possible sed1335 commands as reported its data sheet are: */
+/* Possible sed1335 commands as reported in its data sheet are: */
 
-/* System control */
+/* system control */
 #define SYSSET_1335		0x40
 #define SLEEP_1335		0x53
 
-/* Display control */
+/* display control */
 #define DISPOFF_1335		0x58
 #define DISP_1335		0x59
 #define SCROLL_1335		0x44
@@ -75,11 +75,11 @@
 #define HDOTSCR_1335		0x5a
 #define OVLAY_1335		0x5b
 
-/* Drawing control */
+/* drawing control */
 #define CSRW_1335		0x46
 #define CSRR_1335		0x47
 
-/* Memory control */
+/* memory control */
 #define MWRITE_1335		0x42
 #define MREAD_1335		0x43
 

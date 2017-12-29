@@ -4,8 +4,8 @@ KSRC		:= /lib/modules/$(KVERSION)/build
 MODINSTDIR	:= /lib/modules/$(KVERSION)/kernel/drivers/input/mouse
 INSTDIR		:= /usr/local/sbin
 
-obj-m		:= synaptics-usb.o
-synaptics-usb-objs	:= synapticsusb.o cpad.o
+obj-m		:= synaptics_usb.o
+synaptics_usb-objs	:= synapticsusb.o cpad.o
 
 all:
 	$(MAKE) -C $(KSRC) M=`pwd` CPATH=`pwd` modules
@@ -29,11 +29,10 @@ distclean:	clean
 	$(RM) -f kernel-patches/synaptics-usb-*.patch
 
 install:	all
-	install -D -m 644 synaptics-usb.ko $(MODINSTDIR)/synaptics-usb.ko
+	install -D -m 644 synaptics_usb.ko $(MODINSTDIR)/synaptics-usb.ko
 	install -D synaptics-usb $(INSTDIR)/synaptics-usb
-	install -D synaptics-usb-rebind $(INSTDIR)/synaptics-usb-rebind
 	depmod -a
 
 uninstall:
-	rm -f $(MODINSTDIR)/synaptics-usb.ko $(INSTDIR)/synaptics-usb-rebind $(INSTDIR)/synaptics-usb
+	rm -f $(MODINSTDIR)/synaptics_usb.ko $(INSTDIR)/synaptics-usb
 	depmod -a

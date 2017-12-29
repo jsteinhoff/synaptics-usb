@@ -8,7 +8,7 @@
 #define DRIVER_VERSION	"v1.5"
 #define DRIVER_AUTHOR	"Rob Miller (rob@inpharmatica . co . uk), "\
 			"Ron Lee (ron@debian.org), "\
-			"Jan Steinhoff <jan.steinhoff@uni-jena.de>"
+			"Jan Steinhoff (cpad@jan-steinhoff . de)"
 #define DRIVER_DESC	"USB Synaptics device driver"
 
 /* vendor and device IDs */
@@ -23,26 +23,25 @@
 #define USB_DID_SYN_WTP		0x0010	/* Synaptics Wireless TouchPad */
 #define USB_DID_SYN_DP		0x0013	/* Synaptics DisplayPad */
 
-/* Structure to hold all of our device specific stuff */
+/* structure to hold all of our device specific stuff */
 struct synusb {
-	struct usb_device *	udev;
-	struct usb_interface *	interface;
+	struct usb_device	*udev;
+	struct usb_interface	*interface;
 	struct kref		kref;
 
 	/* characteristics of the device */
-	unsigned int		input_type	:8;
-	unsigned int		buttons		:8;
-	unsigned int		has_display	:1;
-	unsigned int				:0;
+	unsigned int		input_type:8;
+	unsigned int		buttons:8;
+	unsigned int		has_display:1;
 
 	/* input device related data structures */
-	struct input_dev *	idev;
+	struct input_dev	*idev;
 	char			iphys[64];
 	struct delayed_work	isubmit;
-	struct urb *		iurb;
+	struct urb		*iurb;
 
 	/* cPad display character device, see cpad.h */
-	struct syndisplay *	display;
+	struct syndisplay	*display;
 };
 
 /* possible values for synusb.input_type */
@@ -52,18 +51,27 @@ struct synusb {
 
 extern struct usb_driver synusb_driver;
 
+/* free urb and its buffer */
 void synusb_free_urb(struct urb *urb);
+/* cleanup handler for kref_put, kref_put(&synusb->kref, synusb_delete) */
 void synusb_delete(struct kref *);
 
-static inline int synusb_urb_status_error(struct urb *urb) {
+static inline int synusb_urb_status_error(struct urb *urb)
+{
 	/* sync/async unlink faults aren't errors */
-	if(urb->status == -ENOENT ||
-	   urb->status == -ECONNRESET ||
-	   urb->status == -ESHUTDOWN)
+	if (urb->status == -ENOENT ||
+	    urb->status == -ECONNRESET ||
+	    urb->status == -ESHUTDOWN)
 		return 0;
 	else
 		return urb->status;
 }
+
+/* helper functions for printk */
+#define synusb_err(_synusb, format, arg...)	\
+	dev_err(&(_synusb)->interface->dev, format "\n", ## arg)
+#define synusb_warn(_synusb, format, arg...)	\
+	dev_warn(&(_synusb)->interface->dev, format "\n", ## arg)
 
 #include "cpad.h"
 

@@ -1,0 +1,51 @@
+diff -ruN linux-2.6.33-rc3/drivers/input/mouse/Kconfig linux-2.6.33-rc3-synusb/drivers/input/mouse/Kconfig
+--- linux-2.6.33-rc3/drivers/input/mouse/Kconfig	2010-01-09 19:12:55.159382768 +0100
++++ linux-2.6.33-rc3-synusb/drivers/input/mouse/Kconfig	2010-01-09 19:16:20.194393854 +0100
+@@ -321,4 +321,28 @@
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called synaptics_i2c.
+ 
++config MOUSE_SYNAPTICS_USB
++	tristate "Synaptics USB Touchpad support"
++	depends on USB
++	help
++	  Say Y here if you want to use a Synaptics USB touchpad. Synaptics USB
++	  touchpads emulate an USB mouse by default, so you can also use the
++	  usbhid driver. But you will be able to use Synaptics TouchPad driver
++	  for X.Org in combination with this kernel module, which will improve
++	  mouse movement, enable vertical/horizontal scrolling, etc. More
++	  information can be found at:
++	  <http://jan-steinhoff.de/linux/synaptics-usb.html>
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called synaptics_usb.
++
++config MOUSE_SYNAPTICS_CPADDEV
++	bool "Synaptics cPad display support"
++	depends on MOUSE_SYNAPTICS_USB
++	help
++	  Say Y here if you want to use the display of Synaptics cPad. The
++	  display can be acessed through a character device /dev/usb/cpad?.
++	  Programs that use the character device can be found at:
++	  <http://jan-steinhoff.de/linux/synaptics-usb.html>
++
+ endif
+diff -ruN linux-2.6.33-rc3/drivers/input/mouse/Makefile linux-2.6.33-rc3-synusb/drivers/input/mouse/Makefile
+--- linux-2.6.33-rc3/drivers/input/mouse/Makefile	2010-01-09 19:12:55.157382233 +0100
++++ linux-2.6.33-rc3-synusb/drivers/input/mouse/Makefile	2010-01-09 19:17:06.603387327 +0100
+@@ -18,6 +18,7 @@
+ obj-$(CONFIG_MOUSE_RISCPC)		+= rpcmouse.o
+ obj-$(CONFIG_MOUSE_SERIAL)		+= sermouse.o
+ obj-$(CONFIG_MOUSE_SYNAPTICS_I2C)	+= synaptics_i2c.o
++obj-$(CONFIG_MOUSE_SYNAPTICS_USB)	+= synaptics_usb.o
+ obj-$(CONFIG_MOUSE_VSXXXAA)		+= vsxxxaa.o
+ 
+ psmouse-objs := psmouse-base.o synaptics.o
+@@ -30,3 +31,7 @@
+ psmouse-$(CONFIG_MOUSE_PS2_SENTELIC)	+= sentelic.o
+ psmouse-$(CONFIG_MOUSE_PS2_TRACKPOINT)	+= trackpoint.o
+ psmouse-$(CONFIG_MOUSE_PS2_TOUCHKIT)	+= touchkit_ps2.o
++
++synaptics_usb-objs := synapticsusb.o
++
++synaptics_usb-$(CONFIG_MOUSE_SYNAPTICS_CPADDEV) += cpad.o

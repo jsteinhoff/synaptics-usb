@@ -5,7 +5,7 @@ print_help () {
 	echo "	$0 <command> <value>"
 	echo
 	echo "rebind_to 	: <value> is the name of the kernel module where"
-	echo "		  to rebind to, i.e. synaptics-usb or usbhid."
+	echo "		  to rebind to, i.e. synaptics_usb or usbhid."
 	echo "rebind_stick_to	: same as rebind_to for sticks instead of touchpads"
 	echo "persist		: set if device is persitent during hibernation,"
 	echo "		  value can be on or off"
@@ -22,9 +22,13 @@ device_list="0001 0002 0003 0007 0008 0009"
 int_num=":1.0"
 
 rebind () {
-	ddir=/sys/bus/usb/drivers/$2
+	dname=$2
 	idir="$1$int_num"
-	if [ $2 = synaptics-usb ] && [ -f $ddir/new_id ] ; then
+	if [ $dname = synaptics-usb ] ; then
+		dname=synaptics_usb
+	fi
+	ddir=/sys/bus/usb/drivers/$dname
+	if [ $dname = synaptics_usb ] && [ -f $ddir/new_id ] ; then
 		for i in $device_list ; do
 			echo "$vendor $i" > $ddir/new_id
 		done
@@ -34,25 +38,29 @@ rebind () {
 			interface=`basename $idir`
 			echo -n $interface 2> /dev/null > $idir/driver/unbind
 			echo -n $interface 2> /dev/null > $ddir/bind
-		else
+		elif [ $dname = synaptics_usb ] ; then
 			echo "Using old rebind method..."
 			echo "1" 2> /dev/null > $ddir/module/parameters/rebind
 		fi
 		if [ ! $idir/driver -ef $ddir ] ; then
-			echo "ERROR: Can not rebind interface $interface"
+			echo "ERROR: Can not rebind interface `basename $idir` to $dname kernel module"
 		fi
 	fi
 }
 
 rebind_stick () {
-	ddir=/sys/bus/usb/drivers/$2
+	dname=$2
+	if [ $dname = synaptics-usb ] ; then
+		dname=synaptics_usb
+	fi
+	ddir=/sys/bus/usb/drivers/$dname
 	if [ `cat $1/idProduct` = "0009" ] ; then
 		int_num=":1.1"
 	fi
-	if [ $2 = synaptics-usb ] ; then
+	if [ $dname = synaptics_usb ] ; then
 		echo "1" > $ddir/module/parameters/enable_stick
 	fi
-	rebind $1 $2
+	rebind $1 $dname
 }
 
 persist () {
@@ -83,10 +91,10 @@ autosuspend () {
 }
 
 do_all () {
-	if [ ! -d /sys/bus/usb/drivers/synaptics-usb ] ; then
-		/sbin/modprobe synaptics-usb
-		if [ ! -d /sys/bus/usb/drivers/synaptics-usb ] ; then
-			echo "ERROR: Can not load module"
+	if [ ! -d /sys/bus/usb/drivers/synaptics_usb ] ; then
+		/sbin/modprobe synaptics_usb
+		if [ ! -d /sys/bus/usb/drivers/synaptics_usb ] ; then
+			echo "ERROR: Can not load synaptics_usb kernel module"
 		fi
 	fi
 	for i in /sys/bus/usb/devices/* ; do
