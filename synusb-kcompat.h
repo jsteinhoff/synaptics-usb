@@ -1,3 +1,6 @@
+#ifndef _SYNUSB_KCOMPAT_H
+#define _SYNUSB_KCOMPAT_H
+
 #include <linux/version.h>
 #include <linux/usb.h>
 #include <linux/input.h>
@@ -5,6 +8,8 @@
 #include <linux/types.h>
 #include <asm/atomic.h>
 #include <linux/workqueue.h>
+
+#include "kconfig.h"
 
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23)
@@ -218,3 +223,5 @@ static void kref_put(struct kref *kref, void (*release) (struct kref *kref))
 
 #endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,9) */
 #endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,5) */
+
+#endif /* _SYNUSB_KCONFIG_H */

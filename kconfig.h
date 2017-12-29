@@ -3,6 +3,21 @@
  * this is will be handled by a Kconfig file later
  */
 
+#ifndef _SYNUSB_KCONFIG_H
+#define _SYNUSB_KCONFIG_H
+
+#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,15)
+#include <linux/config.h>
+#endif
+
+/* support for /dev/usb/cpad* device */
+#define CONFIG_USB_CPADDEV
+/* uncomment the following to disable it */
+//#undef CONFIG_USB_CPADDEV
+
+/* enable debugging messages */
+//#define DEBUG
 
 #if !defined(CONFIG_USB) && !defined(CONFIG_USB_MODULE)
 #error : kernel has no USB support. Compile kernel with CONFIG_USB.
@@ -15,18 +30,4 @@
 #warning : Synaptics TouchPad driver for XFree86 needs CONFIG_INPUT_EVDEV.
 #endif
 
-/* support for /dev/usb/cpad* device */
-#define CONFIG_USB_CPADDEV
-/* uncomment the following to disable it */
-//#undef CONFIG_USB_CPADDEV
-
-/* enable debugging messages */
-//#define DEBUG 1
-
-#undef dbg
-#ifdef DEBUG
-#define dbg(format, arg...) printk(KERN_DEBUG "%s: " format "\n" , \
-	__FILE__ , ## arg)
-#else
-#define dbg(format, arg...) do {} while (0)
-#endif
+#endif /* _SYNUSB_KCONFIG_H */

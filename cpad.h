@@ -1,84 +1,112 @@
-#ifndef _LINUX_CPAD_H
-#define _LINUX_CPAD_H
+#ifndef _CPAD_H
+#define _CPAD_H
 
-#include <linux/input.h>
+#include "kconfig.h"
 
+#ifdef CONFIG_USB_CPADDEV
 
-/* supported ioctls for /dev/usb/cpad*
- * because the backlight has a finite lifespan (ca. 1000 - 3000 hours), the
- * CPAD_FLASH ioctl should be used instead of CPAD_WLIGHT.
- * to get the result of CPAD_RLIGHT and CPAD_RLCD, read some bytes from
- * the character device. the third byte is the result.
- */
-#define CPAD_IOCTL_BASE		0x71
+#include <linux/usb.h>
+#include <linux/mutex.h>
+#include <linux/completion.h>
+#include <linux/workqueue.h>
 
-/* get driver version */
-#define CPAD_VERSION		_IOR('U', CPAD_IOCTL_BASE, int)
+#include "synapticsusb.h"
 
-/* get device ID */
-#define CPAD_CGID		_IOR('U', CPAD_IOCTL_BASE+1, struct input_id)
+#define USB_CPAD_MINOR_BASE	192
 
-/* reset usb device (DEPRECATED) */
-#define CPAD_RESET		_IO('U', CPAD_IOCTL_BASE+2)
+/* packet size of in and out bulk endpoints */
+#define CPAD_PACKET_SIZE	32
+/* a packet consists of a command and optional parameters */
+#define CPAD_COMMAND_SIZE	2
+#define CPAD_MAX_PARAM_SIZE	(CPAD_PACKET_SIZE-CPAD_COMMAND_SIZE)
+/* One packet (32 bytes) is needed to write 30 bytes to the display RAM.
+ * The cPad has 8k (=30*273+2) bytes of RAM, so the maximum useful number
+ * of packets in an URB is 274. Notice that the transfer buffer is re-used. */
+#define CPAD_MAX_TRANSFER	(274*CPAD_PACKET_SIZE)
 
-/* set backlight state */
-#define CPAD_WLIGHT		_IOW('U', CPAD_IOCTL_BASE+3, u8)
+/* possible values for the first byte of a packet */
+#define SEL_CPAD	0x01	/* select non-lcd-controller function */
+#define SEL_1335	0x02	/* run sed1335 command, see linux/cpad.h */
 
-/* set LCD state */
-#define CPAD_WLCD		_IOW('U', CPAD_IOCTL_BASE+5, u8)
+/* observed non-lcd-controller functions */
+#define CPAD_W_ROM	0x01	/* write EEPROM, not supported by this driver */
+#define CPAD_R_ROM	0x02	/* read EEPROM */
+#define CPAD_W_LIGHT	0x03	/* write backlight state (on/off) */
+#define CPAD_R_LIGHT	0x04	/* read backlight state (on/off) */
+#define CPAD_W_LCD	0x05	/* write lcd state (on/off) */
+#define CPAD_R_LCD	0x06	/* read lcd state (on/off) */
+#define CPAD_RSRVD	0x07
 
-/* read backlight state */
-#define CPAD_RLIGHT		_IO('U', CPAD_IOCTL_BASE+6)
+/* struct syndisplay uses its parents kref */
+struct syndisplay {
+	struct synusb *		parent;
 
-/* read LCD state */
-#define CPAD_RLCD		_IO('U', CPAD_IOCTL_BASE+7)
+	struct mutex		open_mutex;	/* synchronize open/close against disconnect*/
+	int			open_count;	/* locked by open_close_mutex */
 
-/* flash backlight */
-#define CPAD_FLASH		_IOW('U', CPAD_IOCTL_BASE+8, int)
+	struct mutex		io_mutex;	/* synchronize io, locks all except open_count */
+	struct completion	done;		/* wait for callbacks */
+	int			error;		/* report error in callback */
+	struct cpad_urb	*	user_urb;	/* urb initiated by user, is re-used */
+	struct cpad_urb	*	nlcd_urb;	/* used by the driver, e.g., to switch off the backlight */
+	struct delayed_work	flash;		/* flash backlight */
+	__u8			in_endpointAddr;
+	__u8			out_endpointAddr;
 
-/* read eeprom */
-#define CPAD_REEPROM		_IO('U', CPAD_IOCTL_BASE+4)
+	/* status of the device */
+	unsigned int		gone		:1;
+	unsigned int		has_indata	:1;
+	unsigned int		reset_notify	:1;
+	unsigned int		reset_in_progress :1;
+	unsigned int		suspended	:1;
+	unsigned int		backlight_on	:1;
+	unsigned int				:0;
+};
 
+#define CPAD_USER_URB	0	/* use syndisplay.user_urb */
+#define CPAD_NLCD_URB	1	/* use syndisplay.nlcd_urb */
 
-/*
- * writing to /dev/usb/cpad*
- *	the cPad display is controlled by a Seiko/Epson 1335 LCD Controller IC
- *	a write to the device consists of a command followed by data:
- *		<1335 command> [<data> ...]
- *	for the MRWITE_1335 command, data may be up to 274*30 bytes long
- *	possible commands as reported in the sed1335 data sheet are:
- */
-/* System control */
-#define SYSSET_1335		0x40
-#define SLEEP_1335		0x53
+struct cpad_urb {
+	struct syndisplay *	display;
+	struct urb		*in, *out;
+};
 
-/* Display control */
-#define DISPOFF_1335		0x58
-#define DISP_1335		0x59
-#define SCROLL_1335		0x44
-#define CSRF_1335		0x5d
-#define CGRAMADR_1335		0x5c
-#define CSRDIR_RIGHT_1335	0x4c
-#define CSRDIR_LEFT_1335	0x4d
-#define CSRDIR_UP_1335		0x4e
-#define CSRDIR_DOWN_1335	0x4f
-#define HDOTSCR_1335		0x5a
-#define OVLAY_1335		0x5b
+int cpad_alloc(struct synusb *);
+void cpad_free(struct synusb *);
+int cpad_setup_in(struct synusb *, struct usb_endpoint_descriptor *);
+int cpad_setup_out(struct synusb *, struct usb_endpoint_descriptor *);
+int cpad_check_setup(struct synusb *);
+int cpad_init(struct synusb *);
+void cpad_disconnect(struct synusb *);
 
-/* Drawing control */
-#define CSRW_1335		0x46
-#define CSRR_1335		0x47
+int cpad_suspend(struct synusb *);
+int cpad_resume(struct synusb *);
+int cpad_reset_resume(struct synusb *);
+int cpad_pre_reset(struct synusb *);
+int cpad_post_reset(struct synusb *);
 
-/* Memory control */
-#define MWRITE_1335		0x42
-#define MREAD_1335		0x43
+#else /* CONFIG_USB_CPADDEV */
 
+#include "synapticsusb.h"
 
-/*
- * reading /dev/usb/cpad*
- *	reads answer of the sed1335 to a command, can be 2-32 bytes long.
- *	the information is only accessible until the next write access.
- */
+struct syndisplay { };
 
+static inline int cpad_alloc(struct synusb *synusb) { return 0; }
+void cpad_free(struct synusb *synusb) { }
+static inline int cpad_setup_in(struct synusb *synusb,
+	struct usb_endpoint_descriptor *endpoint) { return 0; }
+static inline int cpad_setup_out(struct synusb *synusb,
+	struct usb_endpoint_descriptor *endpoint) { return 0; }
+static inline int cpad_check_setup(struct synusb *synusb) { return 0; }
+static inline int cpad_init(struct synusb *synusb) { return 0; }
+static inline void cpad_disconnect(struct synusb *synusb) { }
 
-#endif /* _LINUX_CPAD_H */
+int cpad_suspend(struct synusb *synusb) { return 0; }
+int cpad_resume(struct synusb *synusb) { return 0; }
+int cpad_reset_resume(struct synusb *synusb) { return 0; }
+int cpad_pre_reset(struct synusb *synusb) { return 0; }
+int cpad_post_reset(struct synusb *synusb) { return 0; }
+
+#endif /* CONFIG_USB_CPADDEV */
+
+#endif /* _CPAD_H */
