@@ -1,7 +1,7 @@
 diff -ruN linux-2.6.13/drivers/usb/input/Kconfig linux-2.6.13-synusb/drivers/usb/input/Kconfig
---- linux-2.6.13/drivers/usb/input/Kconfig	2005-11-19 05:53:07.915560336 +0100
-+++ linux-2.6.13-synusb/drivers/usb/input/Kconfig	2005-11-19 06:00:00.432848176 +0100
-@@ -272,3 +272,33 @@
+--- linux-2.6.13/drivers/usb/input/Kconfig	2005-12-03 01:50:05.351563984 +0100
++++ linux-2.6.13-synusb/drivers/usb/input/Kconfig	2005-12-03 01:50:44.713580048 +0100
+@@ -272,3 +272,29 @@
  
  	  To compile this driver as a module, choose M here: the module will
  	  be called keyspan_remote.
@@ -10,11 +10,7 @@ diff -ruN linux-2.6.13/drivers/usb/input/Kconfig linux-2.6.13-synusb/drivers/usb
 +	tristate "Synaptics USB Touchpad support"
 +	depends on USB && INPUT
 +	---help---
-+	  Say Y here if you want to use a Synaptics USB Touchpad. Currently
-+	  devices with vendor ID 0x06cb and product ID 2, 3 or 9 are
-+	  supported. Interfaces with product ID 9 are used in devices with
-+	  IBM UltraNav.
-+
++	  Say Y here if you want to use a Synaptics USB Touchpad.
 +	  Synaptics USB touchpads emulate an USB mouse by default, so you
 +	  can also use the usbhid driver. But you will be able to use
 +	  Synaptics TouchPad driver for XOrg/XFree86 in combination with
@@ -36,8 +32,8 @@ diff -ruN linux-2.6.13/drivers/usb/input/Kconfig linux-2.6.13-synusb/drivers/usb
 +	  be found at:
 +	  <http://www.uni-jena.de/~p1stja/linux/synaptics-usb.html>
 diff -ruN linux-2.6.13/drivers/usb/input/Makefile linux-2.6.13-synusb/drivers/usb/input/Makefile
---- linux-2.6.13/drivers/usb/input/Makefile	2005-11-19 05:53:07.915560336 +0100
-+++ linux-2.6.13-synusb/drivers/usb/input/Makefile	2005-11-19 05:59:26.592992616 +0100
+--- linux-2.6.13/drivers/usb/input/Makefile	2005-12-03 01:50:05.349564288 +0100
++++ linux-2.6.13-synusb/drivers/usb/input/Makefile	2005-12-03 01:50:05.357563072 +0100
 @@ -40,3 +40,4 @@
  obj-$(CONFIG_USB_WACOM)		+= wacom.o
  obj-$(CONFIG_USB_ACECAD)	+= acecad.o

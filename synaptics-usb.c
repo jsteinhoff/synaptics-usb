@@ -32,6 +32,7 @@
 #include <linux/usb.h>
 #include <linux/moduleparam.h>
 #include <linux/kref.h>
+#include <linux/input.h>
 #include <linux/cpad.h>
 
 
@@ -41,15 +42,20 @@
 			"Jan Steinhoff <jan.steinhoff@uni-jena.de>"
 #define DRIVER_DESC "USB Synaptics touchpad Driver"
 
-#define USB_VENDOR_ID_SYNAPTICS 0x06cb
-#define USB_DEVICE_ID_SYN_USB   0x0002
-#define USB_DEVICE_ID_CPAD      0x0003
-#define USB_DEVICE_ID_ULTRANAV  0x0009
+/* vendor and device IDs */
+#define USB_VID_SYNAPTICS	0x06cb	/* Synaptics vendor ID */
+#define USB_DID_SYN_TP		0x0001	/* Synaptics USB TouchPad */
+#define USB_DID_SYN_INT_TP	0x0002	/* Synaptics Integrated USB TouchPad */
+#define USB_DID_SYN_CPAD	0x0003	/* Synaptics cPad */
+#define USB_DID_SYN_WP		0x0008	/* Synaptics USB WheelPad */
+#define USB_DID_SYN_COMP_TP	0x0009	/* Synaptics Composite USB TouchPad */
 
 static struct usb_device_id synusb_idtable [] = {
-	{ USB_DEVICE(USB_VENDOR_ID_SYNAPTICS, USB_DEVICE_ID_SYN_USB) },
-	{ USB_DEVICE(USB_VENDOR_ID_SYNAPTICS, USB_DEVICE_ID_CPAD) },
-	{ USB_DEVICE(USB_VENDOR_ID_SYNAPTICS, USB_DEVICE_ID_ULTRANAV) },
+	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_TP) },
+	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_INT_TP) },
+	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_CPAD) },
+	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_WP) },
+	{ USB_DEVICE(USB_VID_SYNAPTICS, USB_DID_SYN_COMP_TP) },
 	{ }
 };
 MODULE_DEVICE_TABLE (usb, synusb_idtable);
@@ -97,6 +103,7 @@ static void synusb_delete(struct kref *kref)
 
 	synusb_free_urb(synusb->iurb);
 #ifdef CONFIG_USB_CPADDEV
+	synusb->out->transfer_buffer_length = 274*32;
 	synusb_free_urb(synusb->in);
 	synusb_free_urb(synusb->out);
 #endif /* CONFIG_USB_CPADDEV */
@@ -124,7 +131,10 @@ module_param(xmax, int, 0444);
 module_param(ymin, int, 0444);
 module_param(ymax, int, 0444);
 
-static char synusb_input_name[] = "Synaptics touchpad";
+static int btn_middle = 1;
+module_param(btn_middle, int, 0644);
+
+static char synusb_input_name[] = "Synaptics USB touchpad";
 
 static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
 {
@@ -183,7 +193,8 @@ static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
 	input_report_key (idev, BTN_TOOL_TRIPLETAP, num_fingers == 3);
 	input_report_key (idev, BTN_LEFT, data[1] & 0x04);
 	input_report_key (idev, BTN_RIGHT, data[1] & 0x01);
-	input_report_key (idev, BTN_MIDDLE, data[1] & 0x08);
+	input_report_key (idev, btn_middle ? BTN_MIDDLE : BTN_MISC,
+			  data[1] & 0x08);
 	input_sync (idev);
 resubmit:
 	res = usb_submit_urb (urb, GFP_ATOMIC);
@@ -230,6 +241,7 @@ static void synusb_init_input(struct synusb_context *synusb)
 	set_bit (BTN_LEFT, idev->keybit);
 	set_bit (BTN_RIGHT, idev->keybit);
 	set_bit (BTN_MIDDLE, idev->keybit);
+	set_bit (BTN_MISC, idev->keybit);
 
 	usb_make_path (udev, path, 56);
 	sprintf (synusb->iphys, "%s/input0", path);
@@ -828,10 +840,12 @@ static int synusb_probe(struct usb_interface *interface,
 	int no_display = 1;
 
 #ifdef CONFIG_USB_CPADDEV
-	no_display = (id->idProduct == USB_DEVICE_ID_CPAD) ? 0 : 1;
+	no_display = (id->idProduct == USB_DID_SYN_CPAD) ? 0 : 1;
 #endif /* CONFIG_USB_CPADDEV */
 
 	ifnum = interface->cur_altsetting->desc.bInterfaceNumber;
+	if ((id->idProduct == USB_DID_SYN_COMP_TP) && (ifnum != 0))
+		return -ENODEV;
 	if (usb_set_interface (udev, ifnum, no_display ? 1 : 2))
 		return -ENODEV;
 
