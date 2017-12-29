@@ -288,7 +288,7 @@ static struct urb *cpad_alloc_bulk(struct cpad_urb *curb, size_t size,
 	if (urb == NULL)
 		return NULL;
 
-	buffer = usb_buffer_alloc(udev, size, GFP_KERNEL, &urb->transfer_dma);
+	buffer = usb_alloc_coherent(udev, size, GFP_KERNEL, &urb->transfer_dma);
 	if (buffer == NULL)
 		goto error;
 
@@ -740,7 +740,7 @@ void cpad_free(struct synusb *synusb)
 	if (display == NULL)
 		return;
 
-	/* restore the allocated buffer length for usb_buffer_free in
+	/* restore the allocated buffer length for usb_free_coherent in
 	 * synusb_free_urb to work correctly */
 	if (display->user_urb)
 		if (display->user_urb->out)

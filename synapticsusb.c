@@ -329,8 +329,8 @@ static int synusb_setup_iurb(struct synusb *synusb,
 	synusb->iurb = usb_alloc_urb(0, GFP_KERNEL);
 	if (synusb->iurb == NULL)
 		return -ENOMEM;
-	buf = usb_buffer_alloc(synusb->udev, 8, GFP_ATOMIC,
-			       &synusb->iurb->transfer_dma);
+	buf = usb_alloc_coherent(synusb->udev, 8, GFP_ATOMIC,
+							 &synusb->iurb->transfer_dma);
 	if (buf == NULL)
 		return -ENOMEM;
 	usb_fill_int_urb(synusb->iurb, synusb->udev,
@@ -468,8 +468,8 @@ void synusb_free_urb(struct urb *urb)
 {
 	if (urb == NULL)
 		return;
-	usb_buffer_free(urb->dev, urb->transfer_buffer_length,
-			urb->transfer_buffer, urb->transfer_dma);
+	usb_free_coherent(urb->dev, urb->transfer_buffer_length,
+					  urb->transfer_buffer, urb->transfer_dma);
 	usb_free_urb(urb);
 }
 

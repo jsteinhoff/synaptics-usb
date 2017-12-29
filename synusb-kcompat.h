@@ -20,6 +20,12 @@
 
 #endif */ /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24) */
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34)
+
+#define usb_alloc_coherent(...) usb_buffer_alloc(##__VA_ARGS__)
+#define usb_free_coherent(...) usb_buffer_free(##__VA_ARGS__)
+
+#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34) */
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
 
