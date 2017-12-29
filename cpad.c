@@ -73,7 +73,7 @@
 #include "cpadconfig.h"
 #include "cpad.h"
 
-#define DRIVER_VERSION "v0.8"
+#define DRIVER_VERSION "v0.9"
 #define DRIVER_AUTHOR	"Rob Miller (rob@inpharmatica . co . uk), "\
 			"Ron Lee (ron@debian.org), "\
 			"Jan Steinhoff <jan.steinhoff@uni-jena.de>"
@@ -85,10 +85,6 @@
 /* redefine them to be a little less noisy in the log */
 #define info(format,...) printk(KERN_INFO "cpad: " format "\n" , ## __VA_ARGS__)
 #define err(format,...) printk(KERN_ERR "cpad: " format "\n" , ## __VA_ARGS__)
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,8)
-#define usb_kill_urb(urb) usb_unlink_urb(urb)
-#endif
 
 
 /*****************************************************************************
@@ -229,19 +225,45 @@ static int disable_fb;
  *	module initialisation						     *
  *****************************************************************************/
 
+#define USB_VENDOR_ID_SYNAPTICS 0x06cb
+#define USB_DEVICE_ID_CPAD      0x0003
+
 static int __init cpad_init(void)
 {
-	int res;
+	int result;
+	struct usb_device *udev = usb_find_device(USB_VENDOR_ID_SYNAPTICS,
+	                                          USB_DEVICE_ID_CPAD);
+	if (udev) {
+		down( &udev->serialize );
+		down_write( &udev->dev.bus->subsys.rwsem );
 
-	cpad_procfs_init();
-	res = usb_register(&cpad_driver);
-	if (res) {
-		err("usb_register failed. Error number %d", res);
-		cpad_procfs_exit();
-		return res;
+		struct usb_interface *interface = usb_ifnum_to_if(udev, 0);
+
+		if (interface && usb_interface_claimed(interface))
+		{
+			info("releasing cPad from generic driver '%s'.",
+			     interface->dev.driver->name);
+			usb_driver_release_interface(
+			       to_usb_driver(interface->dev.driver),interface);
+		}
+
+		up_write( &udev->dev.bus->subsys.rwsem );
+		usb_put_dev(udev);
 	}
-	info(DRIVER_DESC " " DRIVER_VERSION);
-	return 0;
+
+	result = usb_register(&cpad_driver);
+
+	if (udev)
+		up( &udev->serialize );
+
+	if (result == 0) {
+		cpad_procfs_init();
+		info(DRIVER_DESC " " DRIVER_VERSION);
+	}
+	else
+		err("usb_register failed. Error number %d", result);
+
+	return result;
 }
 
 static void __exit cpad_exit(void)
@@ -262,9 +284,6 @@ MODULE_LICENSE ("GPL");
  *	usb routines, based on:						     *
  *		drivers/usb/usb-skeleton.c v1.1				     *
  *****************************************************************************/
-
-#define USB_VENDOR_ID_SYNAPTICS	0x06cb
-#define USB_DEVICE_ID_CPAD	0x0003
 
 static struct usb_device_id cpad_idtable [] = {
 	{ USB_DEVICE(USB_VENDOR_ID_SYNAPTICS, USB_DEVICE_ID_CPAD) },
@@ -392,12 +411,18 @@ static void cpad_disconnect(struct usb_interface *interface)
 	del_timer_sync(&cpad->display.timer);
 
 	/* cancel pending requests */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,8)
 	usb_kill_urb (cpad->touchpad.in.urb);
+	usb_kill_urb (cpad->display.out.urb);
+	usb_kill_urb (cpad->display.in.urb);
+#else
+	usb_unlink_urb (cpad->touchpad.in.urb);
 	if (atomic_read (&cpad->display.busy)) {
-		usb_kill_urb (cpad->display.out.urb);
-		usb_kill_urb (cpad->display.in.urb);
+		usb_unlink_urb (cpad->display.out.urb);
+		usb_unlink_urb (cpad->display.in.urb);
 		wait_for_completion (&cpad->display.finished);
 	}
+#endif
 
 	up (&cpad->sem);
 
@@ -445,8 +470,13 @@ static void cpad_timeout_kill(unsigned long data)
 	struct cpad_context *cpad = (struct cpad_context *) data;
 
 	cpad->display.timed_out = 1;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,8)
 	usb_kill_urb (cpad->display.out.urb);
 	usb_kill_urb (cpad->display.in.urb);
+#else
+	usb_unlink_urb (cpad->display.out.urb);
+	usb_unlink_urb (cpad->display.in.urb);
+#endif
 	err("cpad display urb timed out");
 }
 
@@ -514,7 +544,7 @@ static int cpad_setup_bulk_endpoint(struct cpad_endpoint *bulk,
 	return 0;
 }
 
-static int cpad_setup_int_endpoint(struct cpad_endpoint *tp, 
+static int cpad_setup_int_endpoint(struct cpad_endpoint *tp,
 					struct cpad_context *cpad)
 {
 	size_t buffer_size;
@@ -587,7 +617,7 @@ static int cpad_setup_endpoints(struct cpad_context *cpad)
 			}
 	}
 
-	if (!(cpad->display.in.endpoint_desc && 
+	if (!(cpad->display.in.endpoint_desc &&
 	      cpad->display.out.endpoint_desc &&
 	      cpad->touchpad.in.endpoint_desc)) {
 		err("Could not find all cPad endpoints");
@@ -2082,7 +2112,7 @@ static inline void cpad_fb_oneframe_1bpp(struct cpad_context *cpad,
 
 	for (line=0; line<maxline; line++) {
 		out_buf = cpad_fb_fillpacket(param, 30, out_buf,
-						cpad->fb.invert);
+					     cpad->fb.invert);
 		param += 30;
 	}
 
@@ -2105,7 +2135,7 @@ static inline void cpad_fb_oneframe_24bpp(struct cpad_context *cpad,
 	for (line=0; line<160; line++) {
 		vmem = cpad_fb_convert_line (cpad, line, vmem, param);
 		out_buf = cpad_fb_fillpacket(param, 30, out_buf,
-						cpad->fb.invert);
+					     cpad->fb.invert);
 	}
 	*urb_size = 160*32;
 }
@@ -2126,9 +2156,11 @@ static inline void cpad_fb_oneframe_1bpp_onlychanged(struct cpad_context *cpad,
 	}
 
 	for (line=0; line<maxline; line++) {
-		out_buf = cpad_fb_fillpacket_onlychanged (
-				param, (line==273) ? 2 : 30, out_buf,
-				cpad->fb.invert, &changed);
+		out_buf = cpad_fb_fillpacket_onlychanged (param,
+                                                          (line==273) ? 2 : 30,
+                                                          out_buf,
+                                                          cpad->fb.invert,
+                                                          &changed);
 		param += 30;
 		if (changed) {
 			if (gotfirstline) {
@@ -2163,7 +2195,8 @@ static inline void cpad_fb_oneframe_24bpp_onlychanged(struct cpad_context *cpad,
 	for (line=0; line<160; line++) {
 		vmem = cpad_fb_convert_line (cpad, line, vmem, param);
 		out_buf = cpad_fb_fillpacket_onlychanged (param, 30, out_buf,
-						cpad->fb.invert, &changed);
+                                                          cpad->fb.invert,
+                                                          &changed);
 		if (changed) {
 			if (gotfirstline) {
 				lastline = line;

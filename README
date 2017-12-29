@@ -14,17 +14,17 @@ this kernel module, which will greatly improve mouse movement. The Display can
 be accessed via a frame buffer device and via a character device.
 
 
+cPad and Debian
+---------------
+Ron Lee works on Debian packages for the cPad. The kernel modules are already
+available, user space programs maybe follow soon :-)
+
+
 Problems with usbhid.ko
 -----------------------
-cpad.ko must be loaded before usbhid.ko, otherwise usbhid.ko will handle the
-cPad. To avoid this, add the following line to hid_blacklist[] before { 0, 0 }
-in file drivers/usb/input/hid-core.c in the Linux source:
-	{ 0x06cb, 0x0003, HID_QUIRK_IGNORE },
-And recompile usbhid.ko. There are also some kernel patches which do the work
-for you at http://www.uni-jena.de/~p1stja/linux/cpad.html. To apply the patch,
-do
-	cat <patchfile> | patch -p1
-in the kernel source directory.
+The conflict with usbhid.ko has been solved by Ron and me in the latest release.
+But if you have more than one cPad, you will still need to apply a patch from
+http://www.uni-jena.de/~p1stja/linux/cpad-kpatch.html to the kernel ;)
 
 
 Installation
@@ -143,7 +143,7 @@ Draw only one frame:
 
 Using the frame buffer device
 -----------------------------
-The famebuffer is disabled by default. You can enable it with
+The frame buffer is disabled by default. You can enable it with
 	echo "framerate:30" > /proc/driver/cpad/0
 The following examples assume that your primary display is /dev/fb0, so your 
 touchpad is the second frame buffer device /dev/fb1. If you don't use vesafb or
@@ -195,12 +195,22 @@ Set maximum bpp to 1 (saves 108k memory):
 Bugs
 ----
 - With kernel >= 2.6.7 rmmod hangs while the evdev device of the cPad 
-  (/dev/input/event?) is in use. This was a bug in the input core, and
-  was fixed in kernel 2.6.10.
+  (/dev/input/event?) is in use. usbhid.ko seems to have the same problem.
+  If you are using Synaptics TouchPad driver for XFree86 and do rmmod from
+  xterm, it will hang. Switching to console and then back to X helps.
+  This was a bug in the input core, now fixed in kernel 2.6.10.
 
 
 Changes
 -------
+version 0.9:
+	Grab the cPad back from any driver that has already claimed it.
+	Leap ahead a couple of versions to sync with the 2.4 driver, so
+	people upgrading see a more or less monotonic increase in version
+	numbers (and because the Debian build of 0.5 already released with
+	DRIVER_VERSION of v0.8).  Let's aim for v1.0 to be accepted into
+	the mainstream kernel tree.
+
 version 0.6:
 	invert screen now possible in 1 bpp mode too
 
