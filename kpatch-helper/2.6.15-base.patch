@@ -1,0 +1,44 @@
+diff -ruN linux-2.6.15/drivers/usb/input/Kconfig linux-2.6.15-synusb/drivers/usb/input/Kconfig
+--- linux-2.6.15/drivers/usb/input/Kconfig	2006-01-26 00:26:37.821393296 +0100
++++ linux-2.6.15-synusb/drivers/usb/input/Kconfig	2006-01-26 00:26:37.832391624 +0100
+@@ -306,3 +306,29 @@
+ 
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called appletouch.
++
++config USB_SYNAPTICS
++	tristate "Synaptics USB Touchpad support"
++	depends on USB && INPUT
++	---help---
++	  Say Y here if you want to use a Synaptics USB Touchpad.
++	  Synaptics USB touchpads emulate an USB mouse by default, so you
++	  can also use the usbhid driver. But you will be able to use
++	  Synaptics TouchPad driver for XOrg/XFree86 in combination with
++	  this kernel module, which will improve mouse movement, enable
++	  vertical/horizontal scrolling, etc. More Information can be
++	  found at:
++	  <http://www.uni-jena.de/~p1stja/linux/synaptics-usb.html>
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called synaptics-usb.
++
++config USB_CPADDEV
++	bool "Synaptics cPad display support"
++	depends on USB_SYNAPTICS
++	help
++	  Say Y here if you want to use the display of Synaptics cPad.
++	  The display can be acessed through a character device
++	  /dev/usb/cpad?. Programs that use the character device can
++	  be found at:
++	  <http://www.uni-jena.de/~p1stja/linux/synaptics-usb.html>
+diff -ruN linux-2.6.15/drivers/usb/input/Makefile linux-2.6.15-synusb/drivers/usb/input/Makefile
+--- linux-2.6.15/drivers/usb/input/Makefile	2006-01-26 00:26:37.811394816 +0100
++++ linux-2.6.15-synusb/drivers/usb/input/Makefile	2006-01-26 00:28:21.520628616 +0100
+@@ -42,6 +42,7 @@
+ obj-$(CONFIG_USB_YEALINK)	+= yealink.o
+ obj-$(CONFIG_USB_XPAD)		+= xpad.o
+ obj-$(CONFIG_USB_APPLETOUCH)	+= appletouch.o
++obj-$(CONFIG_USB_SYNAPTICS)	+= synaptics-usb.o
+ 
+ ifeq ($(CONFIG_USB_DEBUG),y)
+ EXTRA_CFLAGS += -DDEBUG

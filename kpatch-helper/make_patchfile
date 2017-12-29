@@ -13,13 +13,10 @@ leave ()
 	exit $1
 }
 
-if [ $VCODE -lt 132621 ] ; then
-	echo "Kernel version not supported!"
-	leave 1
-elif [ $VCODE -ge 132622 ] ; then
-	BASE_PATCH=2.6.14-base.patch
+if [ $VCODE -ge 132623 ] ; then
+	BASE_PATCH=2.6.15-base.patch
 else
-	BASE_PATCH=2.6.13-base.patch
+	BASE_PATCH=2.6.0-base.patch
 fi
 
 rm -rf tmp
@@ -43,8 +40,13 @@ mkdir include
 mkdir include/linux
 cp ../../../synaptics-usb.c drivers/usb/input
 cp ../../../cpad.h include/linux
+if [ $VCODE -le 132622 ] ; then
+	cp ../../../synusb-kcompat.h drivers/usb/input
+else
+	patch -p1 -i ../../cleanup.patch || leave 1
+fi
 cd ..
 
-diff -ruN linux-$KVER linux-$KVER-synusb > ../synaptics-usb-$DVER-for-$KVER.patch
+diff -ruN linux-$KVER linux-$KVER-synusb > ../../kernel-patches/synaptics-usb-$DVER-for-$KVER.patch
 
 leave 0

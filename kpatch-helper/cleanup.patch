@@ -1,0 +1,47 @@
+diff -ruN linux-2.6.15-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.15-synusb-cleanup/drivers/usb/input/synaptics-usb.c
+--- linux-2.6.15-synusb/drivers/usb/input/synaptics-usb.c	2006-01-26 00:51:58.212258752 +0100
++++ linux-2.6.15-synusb-cleanup/drivers/usb/input/synaptics-usb.c	2006-01-26 00:56:35.071169800 +0100
+@@ -22,8 +22,6 @@
+  */
+ 
+ 
+-#include "synusb-kcompat.h"
+-
+ #include <linux/config.h>
+ #include <linux/kernel.h>
+ #include <linux/errno.h>
+@@ -32,12 +30,8 @@
+ #include <linux/module.h>
+ #include <asm/uaccess.h>
+ #include <linux/usb.h>
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
+ #include <linux/usb_input.h>
+-#endif
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,5)
+ #include <linux/kref.h>
+-#endif
+ #include <linux/input.h>
+ #include <linux/moduleparam.h>
+ #include <linux/cpad.h>
+@@ -262,11 +256,7 @@
+ 	idev->phys = synusb->iphys;
+ 	idev->name = synusb_input_name;
+ 	usb_to_input_id(udev, &idev->id);
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,15)
+ 	idev->cdev.dev = &synusb->interface->dev;
+-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,2)
+-	idev->dev = &synusb->interface->dev;
+-#endif
+ 
+ 	input_register_device(idev);
+ 
+@@ -713,9 +703,6 @@
+ static struct usb_class_driver cpad_class = {
+ 	.name =		"usb/cpad%d",
+ 	.fops =		&cpad_fops,
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,15)
+-	.mode =		S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
+-#endif
+ 	.minor_base =	USB_CPAD_MINOR_BASE,
+ };
+ 

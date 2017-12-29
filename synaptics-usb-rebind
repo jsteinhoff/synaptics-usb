@@ -1,0 +1,53 @@
+#!/bin/sh
+
+print_help () {
+	echo "Usage:"
+	echo "	$0  to_synaptics-usb | to_usbhid"
+	echo
+	echo "to_synaptics-usb :  rebind devices to driver synaptics-usb"
+	echo "to_usbhid        :  rebind devices to driver usbhid (kernel >= 2.6.13)"
+	echo
+	exit 1
+}
+
+rebind () {
+	if [ ! $1/driver -ef $2 ] ; then
+		if [ -e $2/bind ] ; then
+			interface=`basename $1`
+			echo -n $interface 2> /dev/null > $1/driver/unbind
+			echo -n $interface 2> /dev/null > $2/bind
+		else
+			echo "Using old rebind method..."
+			echo "1" 2> /dev/null > $2/module/parameters/rebind
+		fi
+		if [ ! $1/driver -ef $2 ] ; then
+			echo "ERROR: Can not rebind interface $interface" 
+		fi
+	fi
+}
+
+device_list="0001 0002 0003 0008 0009"
+
+rebind_to () {
+	for i in /sys/bus/usb/devices/* ; do
+		if [ -e $i/idVendor ] && [ `cat $i/idVendor` = 06cb ] ; then
+			for j in $device_list ; do
+				if [ -e $i/idProduct ] && [ `cat $i/idProduct` = $j ] ; then
+					rebind $i\:1.0 /sys/bus/usb/drivers/$1
+				fi
+			done
+		fi
+	done
+}
+
+if [ $# -ne 1 ] ; then
+	print_help
+fi
+
+case $1 in
+	to_usbhid) 		rebind_to usbhid ;;
+	to_synaptics-usb)	rebind_to synaptics-usb ;;
+	*)			print_help ;;
+esac
+
+exit

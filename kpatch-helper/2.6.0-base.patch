@@ -1,0 +1,47 @@
+diff -ruN linux-2.6.13/drivers/usb/input/Kconfig linux-2.6.13-synusb/drivers/usb/input/Kconfig
+--- linux-2.6.13/drivers/usb/input/Kconfig	2006-01-26 00:17:27.427065952 +0100
++++ linux-2.6.13-synusb/drivers/usb/input/Kconfig	2006-01-26 00:18:30.625458336 +0100
+@@ -127,6 +127,32 @@
+ 
+ endmenu
+ 
++config USB_SYNAPTICS
++	tristate "Synaptics USB Touchpad support"
++	depends on USB && INPUT
++	---help---
++	  Say Y here if you want to use a Synaptics USB Touchpad.
++	  Synaptics USB touchpads emulate an USB mouse by default, so you
++	  can also use the usbhid driver. But you will be able to use
++	  Synaptics TouchPad driver for XOrg/XFree86 in combination with
++	  this kernel module, which will improve mouse movement, enable
++	  vertical/horizontal scrolling, etc. More Information can be
++	  found at:
++	  <http://www.uni-jena.de/~p1stja/linux/synaptics-usb.html>
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called synaptics-usb.
++
++config USB_CPADDEV
++	bool "Synaptics cPad display support"
++	depends on USB_SYNAPTICS
++	help
++	  Say Y here if you want to use the display of Synaptics cPad.
++	  The display can be acessed through a character device
++	  /dev/usb/cpad?. Programs that use the character device can
++	  be found at:
++	  <http://www.uni-jena.de/~p1stja/linux/synaptics-usb.html>
++
+ config USB_AIPTEK
+ 	tristate "Aiptek 6000U/8000U tablet support"
+ 	depends on USB && INPUT
+diff -ruN linux-2.6.13/drivers/usb/input/Makefile linux-2.6.13-synusb/drivers/usb/input/Makefile
+--- linux-2.6.13/drivers/usb/input/Makefile	2006-01-26 00:17:27.424066408 +0100
++++ linux-2.6.13-synusb/drivers/usb/input/Makefile	2006-01-26 00:18:47.551885128 +0100
+@@ -26,6 +26,7 @@
+ 	usbhid-objs	+= hid-ff.o
+ endif
+ 
++obj-$(CONFIG_USB_SYNAPTICS)	+= synaptics-usb.o
+ obj-$(CONFIG_USB_AIPTEK)	+= aiptek.o
+ obj-$(CONFIG_USB_ATI_REMOTE)	+= ati_remote.o
+ obj-$(CONFIG_USB_HID)		+= usbhid.o

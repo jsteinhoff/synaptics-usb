@@ -22,6 +22,8 @@
  */
 
 
+#include "synusb-kcompat.h"
+
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -30,17 +32,22 @@
 #include <linux/module.h>
 #include <asm/uaccess.h>
 #include <linux/usb.h>
-#include <linux/moduleparam.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
+#include <linux/usb_input.h>
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,5)
 #include <linux/kref.h>
+#endif
 #include <linux/input.h>
+#include <linux/moduleparam.h>
 #include <linux/cpad.h>
 
 
-#define DRIVER_VERSION "v1.4"
+#define DRIVER_VERSION	"v1.4"
 #define DRIVER_AUTHOR	"Rob Miller (rob@inpharmatica . co . uk), "\
 			"Ron Lee (ron@debian.org), "\
 			"Jan Steinhoff <jan.steinhoff@uni-jena.de>"
-#define DRIVER_DESC "USB Synaptics touchpad Driver"
+#define DRIVER_DESC	"USB Synaptics touchpad Driver"
 
 /* vendor and device IDs */
 #define USB_VID_SYNAPTICS	0x06cb	/* Synaptics vendor ID */
@@ -66,9 +73,9 @@ struct synusb_context {
 	struct usb_interface *	interface;
 	struct kref		kref;
 
+	int			is_cpad;
 #ifdef CONFIG_USB_CPADDEV
 	/* cPad character device */
-	int			no_display;
 	struct semaphore	sem;
 	int			gone;
 	struct urb		*in, *out;
@@ -79,7 +86,7 @@ struct synusb_context {
 #endif /* CONFIG_USB_CPADDEV */
 
 	/* input device */
-	struct input_dev	idev;
+	struct input_dev	*idev;
 	char			iphys[64];
 	struct work_struct	isubmit;
 	struct urb *		iurb;
@@ -102,6 +109,9 @@ static void synusb_delete(struct kref *kref)
 	struct synusb_context *synusb = to_synusb_dev(kref);
 
 	synusb_free_urb(synusb->iurb);
+	if (synusb->idev)
+		input_free_device(synusb->idev);
+
 #ifdef CONFIG_USB_CPADDEV
 	synusb->out->transfer_buffer_length = 274*32;
 	synusb_free_urb(synusb->in);
@@ -140,7 +150,7 @@ static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
 {
 	struct synusb_context *synusb = (struct synusb_context *)urb->context;
 	unsigned char *data = urb->transfer_buffer;
-	struct input_dev *idev = &synusb->idev;
+	struct input_dev *idev = synusb->idev;
 	int res, w, pressure, num_fingers, tool_width;
 
 	switch (urb->status) {
@@ -193,8 +203,9 @@ static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
 	input_report_key (idev, BTN_TOOL_TRIPLETAP, num_fingers == 3);
 	input_report_key (idev, BTN_LEFT, data[1] & 0x04);
 	input_report_key (idev, BTN_RIGHT, data[1] & 0x01);
-	input_report_key (idev, btn_middle ? BTN_MIDDLE : BTN_MISC,
-			  data[1] & 0x08);
+	if (synusb->is_cpad)
+		input_report_key (idev, btn_middle ? BTN_MIDDLE : BTN_MISC,
+				  data[1] & 0x08);
 	input_sync (idev);
 resubmit:
 	res = usb_submit_urb (urb, GFP_ATOMIC);
@@ -215,23 +226,24 @@ static void synusb_submit_int(void *arg)
 		err ("usb_submit_urb int in failed with result %d", res);
 }
 
-static void synusb_init_input(struct synusb_context *synusb)
+static int synusb_init_input(struct synusb_context *synusb)
 {
-	struct input_dev *idev = &synusb->idev;
+	struct input_dev *idev;
 	struct usb_device *udev = synusb->udev;
 	char path[64];
 
+	idev = input_allocate_device();
+	if (!idev) {
+		err("Can not allocate input device");
+		return -ENOMEM;
+	}
+	synusb->idev = idev;
+
 	set_bit (EV_ABS, idev->evbit);
-	set_bit (ABS_X, idev->absbit);
-	set_bit (ABS_Y, idev->absbit);
-	set_bit (ABS_PRESSURE, idev->absbit);
-	set_bit (ABS_TOOL_WIDTH, idev->absbit);
-	idev->absmin[ABS_X] = xmin;
-	idev->absmax[ABS_X] = xmax;
-	idev->absmin[ABS_Y] = ymin;
-	idev->absmax[ABS_Y] = ymax;
-	idev->absmax[ABS_PRESSURE] = 255;
-	idev->absmax[ABS_TOOL_WIDTH] = 15;
+        input_set_abs_params(idev, ABS_X, XMIN_NOMINAL, XMAX_NOMINAL, 0, 0);
+        input_set_abs_params(idev, ABS_Y, YMIN_NOMINAL, YMAX_NOMINAL, 0, 0);
+        input_set_abs_params(idev, ABS_PRESSURE, 0, 255, 0, 0);
+	input_set_abs_params(idev, ABS_TOOL_WIDTH, 0, 15, 0, 0);
 
 	set_bit (EV_KEY, idev->evbit);
 	set_bit (BTN_TOUCH, idev->keybit);
@@ -240,23 +252,28 @@ static void synusb_init_input(struct synusb_context *synusb)
 	set_bit (BTN_TOOL_TRIPLETAP, idev->keybit);
 	set_bit (BTN_LEFT, idev->keybit);
 	set_bit (BTN_RIGHT, idev->keybit);
-	set_bit (BTN_MIDDLE, idev->keybit);
-	set_bit (BTN_MISC, idev->keybit);
+	if (synusb->is_cpad) {
+		set_bit (BTN_MIDDLE, idev->keybit);
+		set_bit (BTN_MISC, idev->keybit);
+	}
 
-	usb_make_path (udev, path, 56);
-	sprintf (synusb->iphys, "%s/input0", path);
+	usb_make_path (udev, path, sizeof(synusb->iphys));
+	strlcat (synusb->iphys, "/input0", sizeof(synusb->iphys));
 	idev->phys = synusb->iphys;
 	idev->name = synusb_input_name;
-	idev->id.bustype = BUS_USB;
-	idev->id.vendor = udev->descriptor.idVendor;
-	idev->id.product = udev->descriptor.idProduct;
-	idev->id.version = udev->descriptor.bcdDevice;
+	usb_to_input_id(udev, &idev->id);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,15)
+	idev->cdev.dev = &synusb->interface->dev;
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,2)
 	idev->dev = &synusb->interface->dev;
+#endif
 
 	input_register_device(idev);
 
 	INIT_WORK (&synusb->isubmit, synusb_submit_int, synusb);
 	schedule_delayed_work (&synusb->isubmit, HZ/100);
+
+	return 0;
 }
 
 
@@ -528,7 +545,8 @@ static ssize_t cpad_write(struct file *file, const char *user_buffer,
 	if (retval)
 		return retval;
 
-	length = cpad_write_fillbuffer(synusb, user_buffer, count);
+	length = cpad_write_fillbuffer(synusb, (unsigned char*) user_buffer,
+				       count);
 	if (length < 0) {
 		retval = length;
 		goto error;
@@ -636,7 +654,7 @@ static int cpad_ioctl(struct inode *inode, struct file  *file,
 		break;
 
 	case CPAD_CGID:
-		rval = &synusb->idev.id;
+		rval = &synusb->idev->id;
 		break;
 
 	case CPAD_WLIGHT:
@@ -695,7 +713,9 @@ static struct file_operations cpad_fops = {
 static struct usb_class_driver cpad_class = {
 	.name =		"usb/cpad%d",
 	.fops =		&cpad_fops,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,15)
 	.mode =		S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
+#endif
 	.minor_base =	USB_CPAD_MINOR_BASE,
 };
 
@@ -817,7 +837,7 @@ static int synusb_setup_endpoints(struct synusb_context *synusb)
 	}
 
 #ifdef CONFIG_USB_CPADDEV
-	if (!synusb->no_display) {
+	if (synusb->is_cpad) {
 		if (num != 3)
 			return -ENODEV;
 		else
@@ -837,27 +857,22 @@ static int synusb_probe(struct usb_interface *interface,
 	struct synusb_context *synusb = NULL;
 	struct usb_device *udev = interface_to_usbdev(interface);
 	int ifnum, retval = -ENOMEM;
-	int no_display = 1;
+	int is_cpad;
 
-#ifdef CONFIG_USB_CPADDEV
-	no_display = (id->idProduct == USB_DID_SYN_CPAD) ? 0 : 1;
-#endif /* CONFIG_USB_CPADDEV */
+	is_cpad = (id->idProduct == USB_DID_SYN_CPAD) ? 1 : 0;
 
 	ifnum = interface->cur_altsetting->desc.bInterfaceNumber;
 	if ((id->idProduct == USB_DID_SYN_COMP_TP) && (ifnum != 0))
 		return -ENODEV;
-	if (usb_set_interface (udev, ifnum, no_display ? 1 : 2))
+	if (usb_set_interface (udev, ifnum, is_cpad ? 2 : 1))
 		return -ENODEV;
 
-	synusb = kmalloc(sizeof(*synusb), GFP_KERNEL);
+	synusb = kzalloc(sizeof(*synusb), GFP_KERNEL);
 	if (synusb == NULL) {
 		err("Out of memory");
 		goto error;
 	}
-	memset(synusb, 0x00, sizeof(*synusb));
-#ifdef CONFIG_USB_CPADDEV
-	synusb->no_display = no_display;
-#endif /* CONFIG_USB_CPADDEV */
+	synusb->is_cpad = is_cpad;
 	kref_init(&synusb->kref);
 
 	synusb->udev = usb_get_dev(udev);
@@ -868,10 +883,13 @@ static int synusb_probe(struct usb_interface *interface,
 		goto error;
 	}
 	usb_set_intfdata(interface, synusb);
-	synusb_init_input(synusb);
+	retval = synusb_init_input(synusb);
+	if (retval) {
+		goto error;
+	}
 
 #ifdef CONFIG_USB_CPADDEV
-	if (no_display)
+	if (!is_cpad)
 		return 0;
 
 	retval = usb_register_dev(interface, &cpad_class);
@@ -880,7 +898,7 @@ static int synusb_probe(struct usb_interface *interface,
 		usb_set_intfdata(interface, NULL);
 		goto error;
 	}
-	printk(KERN_INFO "cpad registered on minor: %d", interface->minor);
+	printk(KERN_INFO "cpad registered on minor: %d\n", interface->minor);
 
 	init_waitqueue_head(&synusb->wait);
 	INIT_WORK(&synusb->flash, cpad_light_off, synusb);
@@ -904,7 +922,7 @@ static void synusb_disconnect(struct usb_interface *interface)
 	usb_set_intfdata(interface, NULL);
 
 #ifdef CONFIG_USB_CPADDEV
-	if (synusb->no_display) {
+	if (!synusb->is_cpad) {
 		unlock_kernel();
 	} else {
 		usb_deregister_dev(interface, &cpad_class);
@@ -926,11 +944,12 @@ static void synusb_disconnect(struct usb_interface *interface)
 	flush_scheduled_work();
 
 	usb_kill_urb(synusb->iurb);
-	input_unregister_device(&synusb->idev);
+	input_unregister_device(synusb->idev);
+	synusb->idev = 0;
 
 	kref_put(&synusb->kref, synusb_delete);
 
-	printk(KERN_INFO "Synaptics touchpad disconnected");
+	printk(KERN_INFO "Synaptics touchpad disconnected\n");
 }
 
 static struct usb_driver synusb_driver = {
@@ -949,7 +968,7 @@ static int __init synusb_init(void)
 	if (result)
 		err("usb_register failed. Error number %d", result);
 	else
-		printk(KERN_INFO DRIVER_DESC " " DRIVER_VERSION);
+		printk(KERN_INFO DRIVER_DESC " " DRIVER_VERSION "\n");
 
 	return result;
 }
