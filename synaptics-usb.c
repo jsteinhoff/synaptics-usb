@@ -32,7 +32,9 @@
 #include <linux/module.h>
 #include <asm/uaccess.h>
 #include <linux/usb.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
+#include <linux/usb/input.h>
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
 #include <linux/usb_input.h>
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,5)

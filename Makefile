@@ -1,5 +1,5 @@
 KVERSION	:= `uname -r`
-DVERSION	:= 1.4rc4
+DVERSION	:= 1.4rc6
 KSRC		:= /lib/modules/$(KVERSION)/build
 MODINSTDIR	:= /lib/modules/$(KVERSION)/kernel/drivers/usb/input
 INSTDIR		:= /usr/local/sbin
@@ -18,7 +18,7 @@ patch-kernel:	patchfile
 	kpatch-helper/patch-kernel $(KSRC) $(KVERSION) $(DVERSION)
 
 clean:
-	$(RM) -fr *.o *.ko *.mod.c .*.cmd .tmp_versions *~ linux/*~
+	$(RM) -fr *.o *.ko *.mod.c .*.cmd .tmp_versions Modules.symvers Module.symvers *~ linux/*~
 	$(MAKE) clean -C kpatch-helper
 
 mrproper:	clean
