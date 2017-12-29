@@ -596,8 +596,12 @@ static int cpad_flash(struct syndisplay *display, int time)
 
 static int cpad_driver_num = CPAD_DRIVER_NUM;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,35)
+static long cpad_ioctl(struct file  *file, unsigned int  cmd, unsigned long arg)
+#else
 static int cpad_ioctl(struct inode *inode, struct file  *file,
 		      unsigned int  cmd, unsigned long arg)
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36) */
 {
 	struct syndisplay *display;
 	u8 cval = 0;
@@ -693,7 +697,12 @@ static const struct file_operations cpad_fops = {
 	.owner =	THIS_MODULE,
 	.read =		cpad_read,
 	.write =	cpad_write,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,35)
+	.unlocked_ioctl = cpad_ioctl,
+	.compat_ioctl = cpad_ioctl,
+#else
 	.ioctl =	cpad_ioctl,
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36) */
 	.open =		cpad_open,
 	.release =	cpad_release,
 	.flush =	cpad_flush,

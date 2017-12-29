@@ -12,9 +12,8 @@
 #endif
 
 /* support for /dev/usb/cpad* device */
+/* comment the following line to disable it */
 #define CONFIG_MOUSE_SYNAPTICS_CPADDEV
-/* uncomment the following to disable it */
-//#undef CONFIG_MOUSE_SYNAPTICS_CPADDEV
 
 /* enable debugging messages */
 //#define DEBUG
