@@ -172,7 +172,8 @@ static int cpad_submit(struct cpad_urb *curb)
 	struct syndisplay *display = curb->display;
 	int retval;
 
-	INIT_COMPLETION(display->done);
+	/* TODO: fix this for older kernel verions */
+	init_completion(&display->done);	// INIT_COMPLETION(display->done);
 	display->error = 0;
 
 	retval = usb_submit_urb(curb->out, GFP_KERNEL);
@@ -353,8 +354,8 @@ static int cpad_open(struct inode *inode, struct file *file)
 
 	interface = usb_find_interface(&synusb_driver, subminor);
 	if (interface == NULL) {
-		err("%s - error, can't find device for minor %d",
-		    __func__, subminor);
+		printk(KERN_ERR"%s - error, can't find device for minor %d",
+		       __func__, subminor);
 		return -ENODEV;
 	}
 

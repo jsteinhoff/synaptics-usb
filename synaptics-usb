@@ -16,9 +16,9 @@ print_help () {
 }
 
 vendor=06cb
-pad_device_list="0001 0002 0003 0008 0009"
+pad_device_list="0001 0002 0003 0008 0009 5711"
 stick_device_list="0007 0009"
-device_list="0001 0002 0003 0007 0008 0009"
+device_list="0001 0002 0003 0007 0008 0009 5711"
 int_num=":1.0"
 
 rebind () {

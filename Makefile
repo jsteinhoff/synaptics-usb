@@ -29,7 +29,7 @@ distclean:	clean
 	$(RM) -f kernel-patches/synaptics-usb-*.patch
 
 install:	all
-	install -D -m 644 synaptics_usb.ko $(MODINSTDIR)/synaptics-usb.ko
+	install -D -m 644 synaptics_usb.ko $(MODINSTDIR)/synaptics_usb.ko
 	install -D synaptics-usb $(INSTDIR)/synaptics-usb
 	depmod -a
 

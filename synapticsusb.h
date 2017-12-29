@@ -23,7 +23,7 @@
 #define USB_DID_SYN_WTP		0x0010	/* Synaptics Wireless TouchPad */
 #define USB_DID_SYN_DP		0x0013	/* Synaptics DisplayPad */
 
-/* structure to hold all of our device specific stuff */
+/* structure to hold all of our device specific data */
 struct synusb {
 	struct usb_device	*udev;
 	struct usb_interface	*interface;

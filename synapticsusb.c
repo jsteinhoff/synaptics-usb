@@ -421,7 +421,8 @@ static int synusb_setup_endpoints(struct synusb *synusb)
 	return 0;
 }
 
-/* disable experimental stick support by default */
+/* disable stick support by default, as the device becomes unusable without
+ * corresponding user space driver otherwise */
 MODULE_PARM_DESC(enable_stick, "enable trackpoint support");
 static int enable_stick;
 module_param(enable_stick, int, 0644);
@@ -721,7 +722,7 @@ static int __init synusb_init(void)
 
 	result = usb_register(&synusb_driver);
 	if (result)
-		err("usb_register failed. Error number %d", result);
+		printk(KERN_ERR "usb_register failed. Error number %d", result);
 	else
 		pr_info(DRIVER_DESC " " DRIVER_VERSION "\n");
 
