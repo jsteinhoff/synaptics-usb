@@ -1,0 +1,50 @@
+#!/bin/bash
+
+KSRC=$1
+KVER=$2
+DVER=$3
+VCODE=`./version_code`
+BDIR=`pwd`
+
+leave ()
+{
+	cd $BDIR
+	rm -rf tmp
+	exit $1
+}
+
+if [ $VCODE -lt 132621 ] ; then
+	echo "Kernel version not supported!"
+	leave 1
+elif [ $VCODE -ge 132622 ] ; then
+	BASE_PATCH=2.6.14-base.patch
+else
+	BASE_PATCH=2.6.13-base.patch
+fi
+
+rm -rf tmp
+mkdir tmp
+cd tmp
+
+mkdir linux-$KVER
+cd linux-$KVER
+mkdir drivers
+mkdir drivers/usb
+mkdir drivers/usb/input
+cp $KSRC/drivers/usb/input/Makefile drivers/usb/input
+cp $KSRC/drivers/usb/input/Kconfig drivers/usb/input
+cd ..
+
+cp -r linux-$KVER linux-$KVER-synusb
+cd linux-$KVER-synusb
+patch -p1 -i ../../$BASE_PATCH || leave 1
+#echo Press return to continue...; read
+mkdir include
+mkdir include/linux
+cp ../../../synaptics-usb.c drivers/usb/input
+cp ../../../cpad.h include/linux
+cd ..
+
+diff -ruN linux-$KVER linux-$KVER-synusb > ../synaptics-usb-$DVER-for-$KVER.patch
+
+leave 0

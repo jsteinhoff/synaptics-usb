@@ -1,0 +1,12 @@
+#!/bin/bash
+
+KSRC=$1
+KVER=$2
+DVER=$3
+
+PATCH=`pwd`/kpatch/synaptics-usb-$DVER-for-$KVER.patch
+
+patch --dry-run -p1 -d $KSRC -i $PATCH || exit 1
+patch -p1 -d $KSRC -i $PATCH || exit 1
+
+exit 0

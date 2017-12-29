@@ -21,6 +21,7 @@
  * Trademarks are the property of their respective owners.
  */
 
+
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -30,24 +31,11 @@
 #include <asm/uaccess.h>
 #include <linux/usb.h>
 #include <linux/moduleparam.h>
-
-#include "cpad.h"
-
-#include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,5)
 #include <linux/kref.h>
-#endif
-#include "kernel-compatibility.h"
+#include <linux/cpad.h>
 
-#undef err
-#undef info
-#undef warn
-/* redefine them to be a little less noisy in the log */
-#define err(format, arg...) printk(KERN_ERR "synaptics-usb: " format "\n", ## arg)
-#define info(format, arg...) printk(KERN_INFO "synaptics-usb: " format "\n", ## arg)
-#define warn(format, arg...) printk(KERN_WARNING "synaptics-usb: " format "\n", ## arg)
 
-#define DRIVER_VERSION "v1.3"
+#define DRIVER_VERSION "v1.4"
 #define DRIVER_AUTHOR	"Rob Miller (rob@inpharmatica . co . uk), "\
 			"Ron Lee (ron@debian.org), "\
 			"Jan Steinhoff <jan.steinhoff@uni-jena.de>"
@@ -203,8 +191,8 @@ resubmit:
 		err ("usb_submit_urb int in failed with result %d", res);
 }
 
-/* data must always be fetched from the int endpoint, otherwise the touchpad would
- * reconnect to force driver reload, so this is always scheduled by probe
+/* data must always be fetched from the int endpoint, otherwise the touchpad
+ * would reconnect to force driver reload, so this is always scheduled by probe
  */
 static void synusb_submit_int(void *arg)
 {
@@ -251,9 +239,7 @@ static void synusb_init_input(struct synusb_context *synusb)
 	idev->id.vendor = udev->descriptor.idVendor;
 	idev->id.product = udev->descriptor.idProduct;
 	idev->id.version = udev->descriptor.bcdDevice;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,2)
 	idev->dev = &synusb->interface->dev;
-#endif
 
 	input_register_device(idev);
 
@@ -434,7 +420,8 @@ static int cpad_submit_bulk(struct synusb_context* synusb)
 		goto error;
 	}
 
-	retval = wait_event_interruptible_timeout(synusb->wait, synusb->done, 2*HZ);
+	retval = wait_event_interruptible_timeout(synusb->wait, synusb->done,
+						  2*HZ);
 	if (retval <= 0) {
 		usb_kill_urb(synusb->out);
 		usb_kill_urb(synusb->in);
@@ -748,7 +735,7 @@ static int cpad_setup_out(struct synusb_context *synusb,
  */
 
 static int synusb_setup_iurb(struct synusb_context *synusb,
-			   struct usb_endpoint_descriptor *endpoint)
+			     struct usb_endpoint_descriptor *endpoint)
 {
 	char *buf;
 
@@ -762,7 +749,8 @@ static int synusb_setup_iurb(struct synusb_context *synusb,
 	if (!buf)
 		return -ENOMEM;
 	usb_fill_int_urb(synusb->iurb, synusb->udev,
-			 usb_rcvintpipe(synusb->udev, endpoint->bEndpointAddress),
+			 usb_rcvintpipe(synusb->udev,
+					endpoint->bEndpointAddress),
 			 buf, 8, synusb_input_callback,
 			 synusb, endpoint->bInterval);
 	synusb->iurb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
@@ -772,7 +760,8 @@ static int synusb_setup_iurb(struct synusb_context *synusb,
 static struct synusb_endpoint_table {
 	__u8 dir;
 	__u8 xfer_type;
-	int  (*setup)(struct synusb_context *, struct usb_endpoint_descriptor *);
+	int  (*setup)(struct synusb_context *,
+		      struct usb_endpoint_descriptor *);
 } synusb_endpoints [] = {
 #ifdef CONFIG_USB_CPADDEV
 	{ USB_DIR_IN,  USB_ENDPOINT_XFER_BULK, cpad_setup_in },
@@ -790,18 +779,19 @@ static inline int synusb_match_endpoint(struct usb_endpoint_descriptor *ep)
 		if (( (ep->bEndpointAddress & USB_DIR_IN)
 				== synusb_endpoints[i].dir		) &&
 		    ( (ep->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK)
-				== synusb_endpoints[i].xfer_type		))
+				== synusb_endpoints[i].xfer_type	))
 			return i;
 	return -1;
 }
 
 static int synusb_setup_endpoints(struct synusb_context *synusb)
 {
-	struct usb_host_interface *iface_desc = synusb->interface->cur_altsetting;
+	struct usb_host_interface *iface_desc;
 	struct usb_endpoint_descriptor *endpoint;
 	int i, j, res;
 	int num = 0;
 
+	iface_desc = synusb->interface->cur_altsetting;
 	for (i = 0; i < iface_desc->desc.bNumEndpoints; i++) {
 		endpoint = &iface_desc->endpoint[i].desc;
 
@@ -830,7 +820,7 @@ static int synusb_setup_endpoints(struct synusb_context *synusb)
 }
 
 static int synusb_probe(struct usb_interface *interface,
-		      const struct usb_device_id *id)
+			const struct usb_device_id *id)
 {
 	struct synusb_context *synusb = NULL;
 	struct usb_device *udev = interface_to_usbdev(interface);
@@ -876,7 +866,7 @@ static int synusb_probe(struct usb_interface *interface,
 		usb_set_intfdata(interface, NULL);
 		goto error;
 	}
-	info("cpad registered on minor: %d", interface->minor);
+	printk(KERN_INFO "cpad registered on minor: %d", interface->minor);
 
 	init_waitqueue_head(&synusb->wait);
 	INIT_WORK(&synusb->flash, cpad_light_off, synusb);
@@ -901,9 +891,7 @@ static void synusb_disconnect(struct usb_interface *interface)
 
 #ifdef CONFIG_USB_CPADDEV
 	if (synusb->no_display) {
-#endif /* CONFIG_USB_CPADDEV */
 		unlock_kernel();
-#ifdef CONFIG_USB_CPADDEV
 	} else {
 		usb_deregister_dev(interface, &cpad_class);
 
@@ -916,6 +904,8 @@ static void synusb_disconnect(struct usb_interface *interface)
 		/* cancel the rest */
 		cancel_delayed_work(&synusb->flash);
 	}
+#else /* CONFIG_USB_CPADDEV */
+	unlock_kernel();
 #endif /* CONFIG_USB_CPADDEV */
 
 	cancel_delayed_work(&synusb->isubmit);
@@ -926,7 +916,7 @@ static void synusb_disconnect(struct usb_interface *interface)
 
 	kref_put(&synusb->kref, synusb_delete);
 
-	info("Synaptics touchpad disconnected");
+	printk(KERN_INFO "Synaptics touchpad disconnected");
 }
 
 static struct usb_driver synusb_driver = {
@@ -937,67 +927,6 @@ static struct usb_driver synusb_driver = {
 	.id_table =	synusb_idtable,
 };
 
-static int steal = 1;
-
-static void repossess_devices( struct usb_driver *driver, struct usb_device_id *id )
-{
-	if (!steal)
-		return;
-
-	while( id->idVendor )
-	{
-		// XXX Not enough, we need to find ALL devices, not just the
-		//     first of any particular model.
-		struct usb_device *udev = usb_find_device(id->idVendor,id->idProduct);
-
-		if (udev)
-		{
-			struct usb_interface    *interface;
-
-			down_write( &udev->dev.bus->subsys.rwsem );
-			usb_lock_device( udev );
-
-			interface = usb_ifnum_to_if(udev, 0);
-
-			if ( interface->dev.driver != &driver->driver )
-			{
-			    if (usb_interface_claimed(interface))
-			    {
-				    info("releasing '%s' from generic driver '%s'.",
-					 interface->dev.kobj.k_name,
-					 interface->dev.driver->name);
-				    device_release_driver(&interface->dev);
-			    }
-
-			    driver_attach(&driver->driver);
-			}
-			else
-			    info( "already attached" );
-
-			usb_unlock_device( udev );
-			up_write( &udev->dev.bus->subsys.rwsem );
-
-			usb_put_dev(udev);
-		}
-		++id;
-	}
-}
-
-static int rebind_in;
-
-static int synusb_set_rebind(const char *val, struct kernel_param *kp)
-{
-	int retval;
-
-	retval = param_set_int(val, kp);
-        info("user rebind request %d", rebind_in);
-	repossess_devices( &synusb_driver, synusb_idtable );
-	return retval;
-}
-
-module_param_call(rebind, synusb_set_rebind, param_get_int, &rebind_in, 0664);
-module_param_call(steal, synusb_set_rebind, param_get_int, &steal, 0664);
-
 static int __init synusb_init(void)
 {
 	int result;
@@ -1005,10 +934,8 @@ static int __init synusb_init(void)
 	result = usb_register(&synusb_driver);
 	if (result)
 		err("usb_register failed. Error number %d", result);
-	else {
-		info(DRIVER_DESC " " DRIVER_VERSION);
-		repossess_devices( &synusb_driver, synusb_idtable );
-	}
+	else
+		printk(KERN_INFO DRIVER_DESC " " DRIVER_VERSION);
 
 	return result;
 }
