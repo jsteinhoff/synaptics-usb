@@ -228,39 +228,75 @@ static int disable_fb;
 #define USB_VENDOR_ID_SYNAPTICS 0x06cb
 #define USB_DEVICE_ID_CPAD      0x0003
 
+static struct usb_device_id cpad_idtable [] = {
+	{ USB_DEVICE(USB_VENDOR_ID_SYNAPTICS, USB_DEVICE_ID_CPAD) },
+	{ 0, 0 }
+};
+MODULE_DEVICE_TABLE (usb, cpad_idtable);
+
+static struct usb_driver cpad_driver = {
+	.owner =	THIS_MODULE,
+	.name =		"cpad",
+	.probe =	cpad_probe,
+	.disconnect =	cpad_disconnect,
+	.id_table =	cpad_idtable,
+};
+
+static void repossess_devices( struct usb_driver *driver, struct usb_device_id *id )
+{
+	while( id->idVendor )
+	{
+		// XXX Not enough, we need to find ALL devices, not just the
+		//     first of any particular model.
+		struct usb_device *udev = usb_find_device(id->idVendor,id->idProduct);
+
+		if (udev)
+		{
+			down_write( &udev->dev.bus->subsys.rwsem );
+			usb_lock_device( udev );
+
+			struct usb_interface    *interface = usb_ifnum_to_if(udev, 0);
+
+			if( interface->dev.driver &&
+			    interface->dev.driver->owner != driver->driver.owner )
+			{
+			    info( "current = '%s' - '%s' -- this = '%s'",
+				    udev->dev.driver->name,
+				    interface->dev.driver->name,
+				    driver->driver.name);
+
+			    if (interface && usb_interface_claimed(interface))
+			    {
+				    info("releasing '%s' from generic driver '%s'.",
+					 interface->dev.kobj.k_name,
+					 interface->dev.driver->name);
+				    device_release_driver(&interface->dev);
+			    }
+
+			    driver_probe_device(&driver->driver,&interface->dev);
+			}
+			else
+			    info( "already attached" );
+
+			usb_unlock_device( udev );
+			up_write( &udev->dev.bus->subsys.rwsem );
+
+			usb_put_dev(udev);
+		}
+		++id;
+	}
+}
+
 static int __init cpad_init(void)
 {
-	int result;
-	struct usb_device *udev = usb_find_device(USB_VENDOR_ID_SYNAPTICS,
-	                                          USB_DEVICE_ID_CPAD);
-	if (udev) {
-		down( &udev->serialize );
-		down_write( &udev->dev.bus->subsys.rwsem );
-
-		struct usb_interface *interface = usb_ifnum_to_if(udev, 0);
-
-		if (interface && usb_interface_claimed(interface))
-		{
-			info("releasing cPad from generic driver '%s'.",
-			     interface->dev.driver->name);
-			usb_driver_release_interface(
-			       to_usb_driver(interface->dev.driver),interface);
-		}
-
-		up_write( &udev->dev.bus->subsys.rwsem );
-		usb_put_dev(udev);
-	}
-
 	cpad_procfs_init();
-	result = usb_register(&cpad_driver);
 
-	if (udev)
-		up( &udev->serialize );
-
+	int result = usb_register(&cpad_driver);
 	if (result == 0) {
 		info(DRIVER_DESC " " DRIVER_VERSION);
+		repossess_devices( &cpad_driver, cpad_idtable );
 	} else {
-		err("usb_register failed. Error number %d", result);
+		err("usb_register failed, error number: %d", result);
 		cpad_procfs_exit();
 	}
 
@@ -285,20 +321,6 @@ MODULE_LICENSE ("GPL");
  *	usb routines, based on:						     *
  *		drivers/usb/usb-skeleton.c v1.1				     *
  *****************************************************************************/
-
-static struct usb_device_id cpad_idtable [] = {
-	{ USB_DEVICE(USB_VENDOR_ID_SYNAPTICS, USB_DEVICE_ID_CPAD) },
-	{ 0, 0 }
-};
-MODULE_DEVICE_TABLE (usb, cpad_idtable);
-
-static struct usb_driver cpad_driver = {
-	.owner =	THIS_MODULE,
-	.name =		"cpad",
-	.probe =	cpad_probe,
-	.disconnect =	cpad_disconnect,
-	.id_table =	cpad_idtable,
-};
 
 #define MAX_DEVICES	16
 static struct cpad_context *cpad_table[MAX_DEVICES] = { 0 };
