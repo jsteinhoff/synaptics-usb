@@ -1,4 +1,4 @@
-/*
+/****
  * USB Synaptics cPad driver
  *
  *  Copyright (c) 2002 Rob Miller (rob@inpharmatica . co . uk)
@@ -16,31 +16,81 @@
  * Trademarks are the property of their respective owners.
  */
 
-/*
+/****
  * the cPad is an USB touchpad with background display (240x160 mono)
  * it has one interface with three possible alternate settings
- * 	setting 0: one int endpoint for rel movement (used by hid.ko)
+ * 	setting 0: one int endpoint for rel movement (used by usbhid.ko)
  *	setting 1: one int endpoint for abs finger position
  *	setting 2: one int endpoint for abs finger position and
  *		   two bulk endpoints for the display (in/out)
  * this driver uses setting 2
- * see cpad.h for details on the bulk endpoints
+ *
+ * How the bulk endpoints work:
+ *
+ * the cPad display is controlled by a Seiko/Epson 1335 LCD Controller IC
+ * in order to send commands to the sed1335, each packet in the urb must look
+ * like this:
+ *	02 <1335 command> [<data in reversed order> ...]
+ * the possible commands for the sed1335 are listed in cpad.h. the data must
+ * be in reversed order as stated in the sed1335 data sheet.
+ * the urb must be send to the bulk out endpoint. because the packet size of
+ * this endoint is 32 bytes, "02 <1335 command>" must be repeated after 30
+ * bytes of data. the data must be in reversed order in each of this 30 bytes
+ * block. all this is done automatically when writing to the character device.
+ *
+ * functions that are not controlled by the sed1335, like the backlight, can
+ * be accessed by
+ *	01 <function> <state>
+ * the packet must be send to the bulk out endpoint. these functions can be
+ * accessed via ioctls or procfs.
+ *
+ * observed functions are: */
+#define CPAD_W_ROM	0x01	/* write EEPROM (not supported) */
+#define CPAD_R_ROM	0x02	/* read EEPROM (not supported via ioctl) */
+#define CPAD_W_LIGHT	0x03	/* write backlight state (on/off) */
+#define CPAD_R_LIGHT	0x04	/* read backlight state (on/off) */
+#define CPAD_W_LCD	0x05	/* write lcd state (on/off) */
+#define CPAD_R_LCD	0x06	/* read lcd state (on/off) */
+#define CPAD_RSRVD	0x07
+
+/* possible values for the first byte of a packet */
+#define SEL_CPAD	0x01	/* cPad not-lcd-controller select */
+#define SEL_1335	0x02	/* lcd controller select */
+
+/* an urb to the bulk out endpoint must be followed by an urb to the bulk in
+ * endpoint. this gives the answer of the cpad/sed1335. */
+
+/****
+ * BUGS
+ *
+ * - Sometimes the urb for the bulk in endpoint times out. With kernel 2.6.3
+ *   this happens every time the module is reloaded; very seldom with kernel
+ *   >= 2.6.6; not tested 2.6.4 and 2.6.5. I think the following happens:
+ *   The urb to the bulk out endpoint is reported to succeed in
+ *   cpad_display_out_callback, but there is no change on the display, so in
+ *   fact the urb got lost somehow. Reading the answer of the cPad from the
+ *   bulk in endpoint therefore times out.
+ * - With kernel >= 2.6.7 rmmod hangs while the evdev device of the cPad
+ *   (/dev/input/event?) is in use. usbhid.ko seems to have the same problem.
+ *   usb_deregister hangs, although cpad_disconnect returned.
  */
 
-/* includes */
+
 #include <linux/usb.h>
 #include <linux/input.h>
 #include <linux/proc_fs.h>
 #include <linux/fb.h>
 #include <asm/uaccess.h>
 #include <linux/mm.h>
+#include <linux/version.h>
 
 #include "cpadconfig.h"
 #include "cpad.h"
 
-/* version information */
-#define DRIVER_VERSION "v0.2"
-#define DRIVER_AUTHOR "Rob Miller (rob@inpharmatica . co . uk), Ron Lee (ron@debian.org), Jan Steinhoff <jan.steinhoff@uni-jena.de>"
+#define DRIVER_VERSION "v0.3"
+#define DRIVER_AUTHOR	"Rob Miller (rob@inpharmatica . co . uk), "\
+			"Ron Lee (ron@debian.org), "\
+			"Jan Steinhoff <jan.steinhoff@uni-jena.de>"
 #define DRIVER_DESC "USB Synaptics cPad Driver"
 
 
@@ -49,71 +99,86 @@
  *****************************************************************************/
 
 struct cpad_endpoint {
-	struct urb *		urb;			/* urb for this endpoint */
-	struct usb_endpoint_descriptor * endpoint_desc;	/* descriptor of this endpoint */
-	unsigned char *		buffer;			/* buffer to send/receive data */
+	struct urb *		urb;
+	struct usb_endpoint_descriptor * endpoint_desc;
+	unsigned char *		buffer;
 	size_t			buffer_size;
 };
 
+/* Locking:
+ *	sem locks everything in cpad_context, exept open_count, procfs.open and
+ *	fb.open. open_count_sem locks open_count, procfs.open, fb.open and
+ *	present.
+ */
 struct cpad_context {
-	struct usb_device *	udev;			/* usb device pointer */
-	struct usb_interface *	interface;		/* interface for this device */
-	struct semaphore	sem;			/* locks this structure */
-	int			present;		/* if the device is not disconnected */
+	struct usb_device *	udev;
+	struct usb_interface *	interface;
+	struct semaphore	sem;
+
+	int			present;
+	int			open_count;
+	struct semaphore	open_count_sem;
+
+	int			table_index;
 
 	/* display data */
 	struct cpad_display {
-		struct cpad_endpoint	in;		/* bulk in endpoint */
-		struct cpad_endpoint	out;		/* bulk out endpoint */
+		struct cpad_endpoint	in;
+		struct cpad_endpoint	out;
 
-		atomic_t		busy;		/* true if urb is busy */
-		struct completion	finished;	/* wait for urb to finish */
-		wait_queue_head_t	queue;		/* queue for interruptible wait */
-		struct timer_list	timer;		/* timeout for urbs */
-		int			timed_out;	/* true if urbs timed out */
-		int			submit_res;	/* result of usb_submit_urb */
+		atomic_t		busy;
+		struct completion	finished;
+		wait_queue_head_t	queue;
+		struct timer_list	timer;
+		int			timed_out;
+		int			submit_res;
 
-		unsigned char *		tmpbuf;		/* needed for copy_from_user */
+		unsigned char *		tmpbuf;
 		size_t			tmpbuf_size;
-		struct work_struct	flash;		/* used to schedule flash */
+		struct work_struct	flash;
 	} display;
 
 	/* touchpad data */
 	struct cpad_touchpad {
-		struct cpad_endpoint	in;		/* int endpoint */
-		struct input_dev	idev;		/* input subsystem device */
+		struct cpad_endpoint	in;
+		struct input_dev	idev;
+		int			evdev_num;
 		char			phys[64];
-		int			open;		/* touchpad input device open counter */
-		struct work_struct	submit_urb;	/* used to submit urb after probe */
+		struct work_struct	submit_urb;
 	} touchpad;
 
 	/* cpad character device data */
 	struct cpad_char_dev {
 		int			disable;
-		unsigned char		minor;		/* the starting minor number for this device */
-		int			open;		/* if the port is open or not */
+		unsigned char		minor;
 	} char_dev;
 
 	/* procfs data */
 	struct cpad_procfs {
-		int			num;		/* number of this device */
-		struct proc_dir_entry *	entry;		/* procfs entry */
-		char			name[16];	/* procfs filename */
+		int			disable;
+		int			open;
+		struct proc_dir_entry *	entry;
+		char			name[8];
 	} procfs;
 
-	/* framebuffer data */
+	/* frame buffer data */
 	struct cpad_fb {
 		int			disable;
+		int			node;
+		int			open;
 		void *			videomemory;
+		unsigned char *		buffer;
 		u32 			pseudo_palette[17];
-		struct work_struct	drawimage;
-		struct completion	draw_finished;
+		struct work_struct	sendimage;
+		struct completion	finished;
 		struct fb_info		info;
 		int			active;
 		int			rate;
 		int			dither;
 		int 			brightness;
 		int			invert;
+		int 			onlychanged;
+		int			onlyvisible;
 	} fb;
 };
 
@@ -125,38 +190,41 @@ struct cpad_context {
 /* usb */
 static struct usb_driver cpad_driver;
 
-static int cpad_probe(struct usb_interface *interface, const struct usb_device_id *id);
+static int cpad_probe(struct usb_interface *interface,
+				const struct usb_device_id *id);
 static void cpad_disconnect(struct usb_interface *interface);
 static void cpad_display_out_callback(struct urb *urb, struct pt_regs *regs);
 static void cpad_display_in_callback (struct urb *urb, struct pt_regs *regs);
 
 static void cpad_free_context(struct cpad_context *cpad);
 static int cpad_setup_endpoints(struct cpad_context *cpad);
-static void cpad_submit_int_urb(void *arg);
 
-static inline int cpad_check_display_urb_errors (struct cpad_context *cpad);
-static int cpad_nlcd_function (struct cpad_context *cpad, const unsigned char func, const unsigned char val);
+static void cpad_light_off(void *arg);
 
 /* input */
-static inline void cpad_input_init(struct cpad_context *cpad);
-static inline void cpad_input_remove(struct cpad_context *cpad);
+static void cpad_input_add(struct cpad_context *cpad);
+static void cpad_input_remove(struct cpad_context *cpad);
 static void cpad_input_callback(struct urb *urb, struct pt_regs *regs);
+static void cpad_submit_int_urb(void *arg);
 
 /* character device */
-static inline void cpad_dev_init(struct cpad_context *cpad);
-static inline void cpad_dev_remove(struct cpad_context *cpad);
+static void cpad_dev_add(struct cpad_context *cpad);
+static void cpad_dev_remove(struct cpad_context *cpad);
 
 /* procfs */
-static inline void cpad_procfs_init(void);
-static inline void cpad_procfs_remove(void);
-static inline void cpad_procfs_add(struct cpad_context *cpad);
-static inline void cpad_procfs_del(struct cpad_context *cpad);
+static void cpad_procfs_init(void);
+static void cpad_procfs_exit(void);
+static void cpad_procfs_add(struct cpad_context *cpad);
+static void cpad_procfs_remove(struct cpad_context *cpad);
 
-/* framebuffer */
-static inline void cpad_fb_init(struct cpad_context *cpad);
-static inline void cpad_fb_remove(struct cpad_context *cpad);
+/* frame buffer */
+static void cpad_fb_add(struct cpad_context *cpad);
+static void cpad_fb_remove(struct cpad_context *cpad);
+static void cpad_fb_free (struct cpad_context *cpad);
 static void cpad_fb_activate(struct cpad_context *cpad, int rate);
 static void cpad_fb_deactivate(struct cpad_context *cpad);
+static int cpad_fb_oneframe(struct cpad_context *cpad);
+static int disable_fb;
 
 
 /*****************************************************************************
@@ -165,21 +233,23 @@ static void cpad_fb_deactivate(struct cpad_context *cpad);
 
 static int __init cpad_init(void)
 {
+	int res;
+
 	cpad_procfs_init();
-	int result = usb_register(&cpad_driver);
-	if (result) {
-		err("usb_register failed. Error number %d", result);
-		cpad_procfs_remove();
-		return result;
+	res = usb_register(&cpad_driver);
+	if (res) {
+		err("usb_register failed. Error number %d", res);
+		cpad_procfs_exit();
+		return res;
 	}
-	info(DRIVER_DESC " " DRIVER_VERSION);	
+	info(DRIVER_DESC " " DRIVER_VERSION);
 	return 0;
 }
 
 static void __exit cpad_exit(void)
 {
 	usb_deregister(&cpad_driver);
-	cpad_procfs_remove();
+	cpad_procfs_exit();
 }
 
 module_init (cpad_init);
@@ -198,72 +268,103 @@ MODULE_LICENSE ("GPL");
 #define USB_VENDOR_ID_SYNAPTICS	0x06cb
 #define USB_DEVICE_ID_CPAD	0x0003
 
-static struct usb_device_id cpad_table [] = {
+static struct usb_device_id cpad_idtable [] = {
 	{ USB_DEVICE(USB_VENDOR_ID_SYNAPTICS, USB_DEVICE_ID_CPAD) },
 	{ 0, 0 }
 };
-MODULE_DEVICE_TABLE (usb, cpad_table);
+MODULE_DEVICE_TABLE (usb, cpad_idtable);
 
 static struct usb_driver cpad_driver = {
 	.owner =	THIS_MODULE,
 	.name =		"cpad",
 	.probe =	cpad_probe,
 	.disconnect =	cpad_disconnect,
-	.id_table =	cpad_table,
+	.id_table =	cpad_idtable,
 };
 
-static int cpad_probe(struct usb_interface *interface, const struct usb_device_id *id)
+#define MAX_DEVICES	16
+static struct cpad_context *cpad_table[MAX_DEVICES] = { 0 };
+static int cpad_table_index = MAX_DEVICES - 1;
+static DECLARE_MUTEX (cpad_table_sem);
+
+static int cpad_probe(struct usb_interface *interface,
+				const struct usb_device_id *id)
 {
 	struct usb_device *udev = interface_to_usbdev(interface);
 	struct cpad_context *cpad;
-	int res;
+	int retval, i;
 
 	/* activate alternate setting 2 */
-	if (usb_set_interface (udev, interface->altsetting[0].desc.bInterfaceNumber, 2)) {
+	if (usb_set_interface (udev,
+			interface->altsetting[0].desc.bInterfaceNumber, 2))
 		return -ENODEV;
-	}
 
-	/* initialize cpad structure */
+	/* initialize cpad data structure */
 	cpad = kmalloc (sizeof(struct cpad_context), GFP_KERNEL);
 	if (cpad == NULL) {
 		err ("Out of memory");
-		cpad_free_context(cpad);
 		return -ENOMEM;
 	}
 	memset (cpad, 0x00, sizeof (struct cpad_context));
 
 	init_MUTEX (&cpad->sem);
+	init_MUTEX (&cpad->open_count_sem);
 	init_waitqueue_head (&cpad->display.queue);
+	INIT_WORK (&cpad->display.flash, cpad_light_off, cpad);
 	cpad->udev = udev;
 	cpad->interface = interface;
 
-	res = cpad_setup_endpoints(cpad);
-	if (res) {
-		cpad_free_context(cpad);
-		return res;
+	retval = cpad_setup_endpoints(cpad);
+	if (retval)
+		goto error;
+
+	cpad->display.tmpbuf_size =
+			cpad->display.out.endpoint_desc->wMaxPacketSize - 2;
+	cpad->display.tmpbuf = kmalloc (cpad->display.tmpbuf_size, GFP_KERNEL);
+	cpad->fb.buffer = kmalloc (274*32, GFP_KERNEL);
+	if ((cpad->display.tmpbuf == NULL) || (cpad->fb.buffer == NULL)) {
+		err("Out of memory");
+		retval = -ENOMEM;
+		goto error;
 	}
 
 	cpad->present = 1;
+	cpad->table_index = -1;
+	down(&cpad_table_sem);
+	for (i=0; i<MAX_DEVICES; i++) {
+		if (++cpad_table_index == MAX_DEVICES)
+			cpad_table_index = 0;
+		if (cpad_table[cpad_table_index] == 0) {
+			cpad->table_index = cpad_table_index;
+			cpad_table[cpad_table_index] = cpad;
+			break;
+		}
+	}
+	down(&cpad->sem);
+	up(&cpad_table_sem);
 	usb_set_intfdata (interface, cpad);
 
-	cpad_input_init(cpad);
-	INIT_WORK (&cpad->touchpad.submit_urb, cpad_submit_int_urb, cpad);
-	schedule_work (&cpad->touchpad.submit_urb);
-	cpad_dev_init(cpad);
+	/* initialize input, chardev, fb and procfs */
+	cpad_input_add(cpad);
+	cpad_dev_add(cpad);
 	cpad_procfs_add(cpad);
-	cpad_fb_init(cpad);
+	cpad_fb_add(cpad);
+	up(&cpad->sem);
 
 	return 0;
+error:
+	cpad_free_context(cpad);
+	return retval;
 }
 
-/* prevent races between cpad_dev_open() and cpad_disconnect() */
+/* prevent races between ...open() and cpad_disconnect() */
 static DECLARE_MUTEX (disconnect_sem);
 
 static void cpad_disconnect(struct usb_interface *interface)
 {
 	struct cpad_context *cpad;
 
-	/* prevent races with open() */
+	/* prevent races with ...open() */
 	down (&disconnect_sem);
 
 	cpad = usb_get_intfdata (interface);
@@ -271,26 +372,40 @@ static void cpad_disconnect(struct usb_interface *interface)
 
 	down (&cpad->sem);
 
-	usb_unlink_urb(cpad->touchpad.in.urb);
 	cpad_input_remove(cpad);
 	cpad_dev_remove(cpad);
-	cpad_procfs_del(cpad);
-	cpad_fb_remove(cpad);
+	cpad_fb_deactivate (cpad);
 
-	/* unlink bulk urbs */
+	down (&cpad->open_count_sem);
+
+	/* prevent device read, write, ioctl and creation of new works */
+	cpad->present = 0;
+	if (cpad->table_index >= 0)
+		cpad_table[cpad->table_index] = 0;
+	up (&cpad->open_count_sem);
+
+	cancel_delayed_work (&cpad->touchpad.submit_urb);
+	cancel_delayed_work (&cpad->display.flash);
+	up (&cpad->sem);
+	flush_scheduled_work ();
+	down (&cpad->sem);
+
+	/* unlink urbs */
+	usb_unlink_urb(cpad->touchpad.in.urb);
 	if (atomic_read (&cpad->display.busy)) {
 		usb_unlink_urb (cpad->display.out.urb);
 		usb_unlink_urb (cpad->display.in.urb);
 		wait_for_completion (&cpad->display.finished);
 	}
 
-	/* prevent device read, write and ioctl */
-	cpad->present = 0;
-
 	up (&cpad->sem);
 
-	/* if the character device is opened, cpad_release will clean this up */
-	if (!cpad->char_dev.open)
+	/* if a file is opened, this is done in a release function */
+	if (!cpad->procfs.open)
+		cpad_procfs_remove (cpad);
+	if (!cpad->fb.open)
+		cpad_fb_remove (cpad);
+	if (!cpad->open_count)
 		cpad_free_context (cpad);
 
 	up (&disconnect_sem);
@@ -308,78 +423,88 @@ static void cpad_display_out_callback (struct urb *urb, struct pt_regs *regs)
 			return;
 		err ("usb_submit_urb bulk in failed with result %d", res);
 	}
-	del_timer_sync(&cpad->display.timer);
+	del_timer_sync (&cpad->display.timer);
 	atomic_set (&cpad->display.busy, 0);
 	complete (&cpad->display.finished);
-	wake_up (&cpad->display.queue);
+	wake_up_interruptible (&cpad->display.queue);
 }
 
 static void cpad_display_in_callback (struct urb *urb, struct pt_regs *regs)
 {
 	struct cpad_context *cpad = (struct cpad_context *)urb->context;
-	del_timer_sync(&cpad->display.timer);
+
+	del_timer_sync (&cpad->display.timer);
 	atomic_set (&cpad->display.busy, 0);
 	complete (&cpad->display.finished);
-	wake_up (&cpad->display.queue);
+	wake_up_interruptible (&cpad->display.queue);
 }
 
 /*
  * probe/disconnect helper functions
  */
 
+static void cpad_free_endpoint(struct cpad_endpoint *endpoint,
+					struct cpad_context *cpad)
+{
+	if (endpoint->urb) {
+		usb_buffer_free (cpad->udev, endpoint->buffer_size,
+				endpoint->buffer, endpoint->urb->transfer_dma);
+		usb_free_urb (endpoint->urb);
+	}
+}
+
 static void cpad_free_context(struct cpad_context *cpad)
 {
 	if (!cpad)
 		return;
-	if (cpad->display.in.urb)
-		usb_buffer_free (cpad->udev, cpad->display.in.buffer_size,
-				 cpad->display.in.buffer,
-				 cpad->display.in.urb->transfer_dma);
-	usb_free_urb (cpad->display.in.urb);
-	if (cpad->display.out.urb)
-		usb_buffer_free (cpad->udev, cpad->display.out.buffer_size,
-				 cpad->display.out.buffer,
-				 cpad->display.out.urb->transfer_dma);
-	usb_free_urb (cpad->display.out.urb);
-	if (cpad->touchpad.in.urb)
-		usb_buffer_free (cpad->udev, cpad->touchpad.in.buffer_size,
-				 cpad->touchpad.in.buffer,
-				 cpad->touchpad.in.urb->transfer_dma);
-	usb_free_urb (cpad->touchpad.in.urb);
+
+	cpad_free_endpoint(&cpad->display.in, cpad);
+	cpad_free_endpoint(&cpad->display.out, cpad);
+	cpad_free_endpoint(&cpad->touchpad.in, cpad);
+	if (cpad->display.tmpbuf)
+		kfree (cpad->display.tmpbuf);
+	if (cpad->fb.buffer)
+		kfree(cpad->fb.buffer);
+	cpad_procfs_remove(cpad);
 	kfree (cpad);
 }
 
-static int cpad_setup_bulk_endpoint(struct cpad_endpoint *bulk, struct cpad_context *cpad)
+static int cpad_setup_bulk_endpoint(struct cpad_endpoint *bulk,
+					struct cpad_context *cpad)
 {
 	int pipe;
 	size_t buffer_size;
 	usb_complete_t bulk_callback;
 
 	if (bulk->endpoint_desc->bEndpointAddress & USB_DIR_IN) {
-		pipe = usb_rcvbulkpipe (cpad->udev, bulk->endpoint_desc->bEndpointAddress);
+		pipe = usb_rcvbulkpipe (cpad->udev,
+					bulk->endpoint_desc->bEndpointAddress);
 		buffer_size = bulk->endpoint_desc->wMaxPacketSize;
 		bulk_callback = cpad_display_in_callback;
 	}
 	else {
-		pipe = usb_sndbulkpipe (cpad->udev, bulk->endpoint_desc->bEndpointAddress);
-		buffer_size = 160*bulk->endpoint_desc->wMaxPacketSize;
+		pipe = usb_sndbulkpipe (cpad->udev,
+					bulk->endpoint_desc->bEndpointAddress);
+		buffer_size = 274*bulk->endpoint_desc->wMaxPacketSize;
 		bulk_callback = cpad_display_out_callback;
 	}
 
 	bulk->buffer_size = buffer_size;
-	bulk->urb->transfer_flags = (URB_NO_TRANSFER_DMA_MAP | URB_ASYNC_UNLINK);
+	bulk->urb->transfer_flags = (URB_NO_TRANSFER_DMA_MAP |
+					URB_ASYNC_UNLINK);
 	bulk->buffer = usb_buffer_alloc (cpad->udev, buffer_size, GFP_KERNEL,
-					 &bulk->urb->transfer_dma);
+					&bulk->urb->transfer_dma);
 	if (!bulk->buffer) {
 		err("Couldn't allocate bulk buffer");
 		return -ENOMEM;
 	}
-	usb_fill_bulk_urb (bulk->urb, cpad->udev, pipe, bulk->buffer, buffer_size,
-			   bulk_callback, cpad);
+	usb_fill_bulk_urb (bulk->urb, cpad->udev, pipe, bulk->buffer,
+					buffer_size, bulk_callback, cpad);
 	return 0;
 }
 
-static int cpad_setup_int_endpoint(struct cpad_endpoint *tp, struct cpad_context *cpad)
+static int cpad_setup_int_endpoint(struct cpad_endpoint *tp, 
+					struct cpad_context *cpad)
 {
 	size_t buffer_size;
 	struct usb_endpoint_descriptor *endpoint_desc;
@@ -415,27 +540,37 @@ static int cpad_setup_endpoints(struct cpad_context *cpad)
 		struct cpad_endpoint *	endpoint;
 		int (*setup) (struct cpad_endpoint *, struct cpad_context *);
 	} endpoints [] = {
-		{ USB_DIR_IN,  USB_ENDPOINT_XFER_BULK, &cpad->display.in,  cpad_setup_bulk_endpoint },
-		{ USB_DIR_OUT, USB_ENDPOINT_XFER_BULK, &cpad->display.out, cpad_setup_bulk_endpoint },
-		{ USB_DIR_IN,  USB_ENDPOINT_XFER_INT,  &cpad->touchpad.in, cpad_setup_int_endpoint  },
+		{ USB_DIR_IN,  USB_ENDPOINT_XFER_BULK, &cpad->display.in,
+						cpad_setup_bulk_endpoint },
+		{ USB_DIR_OUT, USB_ENDPOINT_XFER_BULK, &cpad->display.out,
+						cpad_setup_bulk_endpoint },
+		{ USB_DIR_IN,  USB_ENDPOINT_XFER_INT,  &cpad->touchpad.in,
+						cpad_setup_int_endpoint  },
 		{ 0, 0, 0, 0 }
 	};
 
 	for (i = 0; i < iface_desc->desc.bNumEndpoints; i++) {
 		endpoint_desc = &iface_desc->endpoint[i].desc;
 		for (j=0; endpoints[j].endpoint; j++)
-			if (! endpoints[j].endpoint->endpoint_desc &&
-			    ((endpoint_desc->bEndpointAddress & USB_DIR_IN) == endpoints[j].dir) &&
-			    ((endpoint_desc->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK)
-							== endpoints[j].xfer_type))
-			{
-				endpoints[j].endpoint->endpoint_desc = endpoint_desc;
-				endpoints[j].endpoint->urb = usb_alloc_urb (0, GFP_KERNEL);
+			if (!endpoints[j].endpoint->endpoint_desc &&
+			    ((endpoint_desc->bEndpointAddress & USB_DIR_IN)
+						== endpoints[j].dir) &&
+			    ((endpoint_desc->bmAttributes &
+			      USB_ENDPOINT_XFERTYPE_MASK)
+						== endpoints[j].xfer_type)) {
+
+				endpoints[j].endpoint->endpoint_desc =
+						endpoint_desc;
+
+				endpoints[j].endpoint->urb =
+						usb_alloc_urb (0, GFP_KERNEL);
 				if (!endpoints[j].endpoint->urb) {
 					err("No free urbs available");
 					return -ENOMEM;
 				}
-				res = endpoints[j].setup (endpoints[j].endpoint, cpad);
+
+				res = endpoints[j].setup (endpoints[j].endpoint,
+						cpad);
 				if (res)
 					return res;
 			}
@@ -443,47 +578,20 @@ static int cpad_setup_endpoints(struct cpad_context *cpad)
 
 	if (!(cpad->display.in.endpoint_desc && 
 	      cpad->display.out.endpoint_desc &&
-	      cpad->touchpad.in.endpoint_desc))
-	{
+	      cpad->touchpad.in.endpoint_desc)) {
 		err("Could not find all cPad endpoints");
 		return -ENODEV;
 	}
 
-	cpad->display.tmpbuf_size = cpad->display.out.endpoint_desc->wMaxPacketSize - 2;
-	cpad->display.tmpbuf = kmalloc (cpad->display.tmpbuf_size, GFP_KERNEL);
-	if (cpad->display.tmpbuf == NULL) {
-		err("Out of memory");
-		return -ENOMEM;
-	}
-
 	return 0;
-}
-
-static void cpad_submit_int_urb(void *arg)
-/* data must always be fetched from the int endpoint, otherwise the cpad would
- * reconnect to force driver reload, so this is always scheduled by probe
- */
-{
-	struct cpad_context *cpad = (struct cpad_context *) arg;
-	int retval;
-
-	retval = usb_submit_urb (cpad->touchpad.in.urb, GFP_KERNEL);
-	if (retval)
-		err ("usb_submit_urb int in failed with result %d", retval);
-
-	/* when doing rmmod cpad and then insmod cpad immediately,
-	 * the first write urb to the bulk endpoints always times 
-	 * out (bug?). The following line makes sure the first urb
-	 * has no use. */
-	cpad_nlcd_function(cpad, CPAD_R_LIGHT, 0);
 }
 
 /*
  * general helper functions
  */
 
-static inline int cpad_check_display_urb_errors(struct cpad_context *cpad)
 /* call with structure locked and after both display urbs finished */
+static inline int cpad_check_display_urb_errors(struct cpad_context *cpad)
 {
 	if (cpad->display.timed_out)
 		return -ETIMEDOUT;
@@ -494,34 +602,62 @@ static inline int cpad_check_display_urb_errors(struct cpad_context *cpad)
 	return cpad->display.in.urb->status;
 }
 
-static int cpad_wait_interruptible(struct cpad_context *cpad)
 /* wait for bulk urbs to finish. call with structure locked */
+static int cpad_wait_interruptible(struct cpad_context *cpad)
 {
 	atomic_t *busy = &cpad->display.busy;
-	wait_queue_head_t *queue = &cpad->display.queue;
+	int res;
 
 	while (atomic_read (busy)) {
-		interruptible_sleep_on_timeout (queue, HZ/2);
-		if (signal_pending (current)) {
-			return -ERESTARTSYS;
-		}
+		res = wait_event_interruptible_timeout(cpad->display.queue, !atomic_read (busy), HZ/2);
+		if (res<=0)
+			return res;
 	}
 
+	return 0;
+}
+
+static inline int cpad_wait (struct cpad_context *cpad, struct file *file)
+{
+	int res;
+
+	if (atomic_read (&cpad->display.busy)) {
+		if (file->f_flags & O_NONBLOCK) {
+			return -EAGAIN;
+		}
+		res = cpad_wait_interruptible (cpad);
+		if (res) {
+			return res;
+		}
+	}
+	return 0;
+}
+
+static inline int cpad_down(struct semaphore *sem, struct file *file)
+{
+	if (down_trylock (sem)) {
+		if (file->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+		else if (down_interruptible (sem))
+			return -ERESTARTSYS;
+	}
 	return 0;
 }
 
 static void cpad_timeout_kill(unsigned long data)
 {
 	struct cpad_context *cpad = (struct cpad_context *) data;
+
+	cpad->display.timed_out = 1;
 	usb_unlink_urb (cpad->display.out.urb);
 	usb_unlink_urb (cpad->display.in.urb);
-	cpad->display.timed_out = 1;
 	err("cpad display urb timed out");
 }
 
 static void cpad_setup_timeout(struct cpad_context *cpad)
 {
 	struct timer_list *timer = &cpad->display.timer;
+
 	init_timer(timer);
 	timer->expires = jiffies + 2*HZ;
 	timer->data = (unsigned long)cpad;
@@ -530,10 +666,11 @@ static void cpad_setup_timeout(struct cpad_context *cpad)
 	cpad->display.timed_out = 0;
 }
 
-static int cpad_nlcd_function(struct cpad_context *cpad, const unsigned char func, const unsigned char val)
 /* structure must be locked before calling this */
+static int cpad_nlcd_function(struct cpad_context *cpad, unsigned char func,
+				unsigned char val)
 {
-	unsigned char *tbuffer_pos = cpad->display.out.buffer;
+	unsigned char *out_buf = cpad->display.out.buffer;
 	int res;
 
 	if ((func < (char) 2) || (func > (char) 6)) {
@@ -548,9 +685,9 @@ static int cpad_nlcd_function(struct cpad_context *cpad, const unsigned char fun
 	if (res)
 		return res;
 
-	*(tbuffer_pos++) = SEL_CPAD;
-	*(tbuffer_pos++) = func;
-	*(tbuffer_pos++) = val;
+	*(out_buf++) = SEL_CPAD;
+	*(out_buf++) = func;
+	*(out_buf++) = val;
 	cpad->display.out.urb->transfer_buffer_length = 3;
 
 	cpad->display.in.buffer[2] = 0;
@@ -573,8 +710,21 @@ static int cpad_nlcd_function(struct cpad_context *cpad, const unsigned char fun
 	return cpad->display.in.buffer[2];
 }
 
-static void cpad_light_off(void *arg)
+static inline unsigned char *cpad_1335_fillpacket(unsigned char cmd,
+		unsigned char *param, size_t param_size, unsigned char *out_buf)
+{
+	unsigned char *point;
+
+	/* select 1335, set 1335 command, reverse params */
+	*(out_buf++) = SEL_1335;
+	*(out_buf++) = cmd;
+	for (point=param+param_size-1; point>=param; point--)
+		*(out_buf++) = *point;
+	return out_buf;
+}
+
 /* don't call this, only used by cpad_flash */
+static void cpad_light_off(void *arg)
 {
 	struct cpad_context *cpad = (struct cpad_context *) arg;
 
@@ -584,23 +734,22 @@ static void cpad_light_off(void *arg)
 	up (&cpad->sem);
 }
 
+/* flash the backlight, time in 10ms. call with structure locked */
 static int cpad_flash(struct cpad_context *cpad, int time)
-/* flash the display, time in 10ms. call with structure locked */
 {
 	struct work_struct *flash = &cpad->display.flash;
-	int res;
+	int retval;
 
 	if (time <= 0)
 		return -EINVAL;
-	if (flash->pending != 0)
+	if (test_bit (0, &flash->pending))
 		return -EBUSY;
-	res = cpad_nlcd_function(cpad, CPAD_W_LIGHT, 1);
-	if (res)
+	retval = cpad_nlcd_function(cpad, CPAD_W_LIGHT, 1);
+	if (retval)
 		err("cpad flash (maybe) failed to turn on");
-	time = min(time, CPAD_MAX_FLASH);
-	INIT_WORK (flash, cpad_light_off, cpad);
+	time = min(time, 1000);
 	schedule_delayed_work (flash, (HZ * (unsigned long) time) / 100);
-	return res;
+	return retval;
 }
 
 
@@ -623,11 +772,7 @@ MODULE_PARM_DESC(disable_input, "disable cPad input device");
 
 static char cpad_input_name[] = "Synaptics cPad";
 
-/* input prototypes */
-static int cpad_input_open(struct input_dev *idev);
-static void cpad_input_close(struct input_dev *idev);
-
-static inline void cpad_input_init(struct cpad_context *cpad)
+static void cpad_input_add(struct cpad_context *cpad)
 {
 	struct input_dev *idev = &cpad->touchpad.idev;
 	struct usb_device *udev = cpad->udev;
@@ -658,11 +803,6 @@ static inline void cpad_input_init(struct cpad_context *cpad)
 	set_bit (BTN_RIGHT, idev->keybit);
 	set_bit (BTN_MIDDLE, idev->keybit);
 
-	/* setup device fops */
-	idev->private = cpad;
-	idev->open = cpad_input_open;
-	idev->close = cpad_input_close;
-
 	/* setup device information */
 	usb_make_path (udev, path, 56);
 	sprintf (cpad->touchpad.phys, "%s/input0", path);
@@ -675,9 +815,12 @@ static inline void cpad_input_init(struct cpad_context *cpad)
 	idev->dev = &cpad->interface->dev;
 
 	input_register_device(idev);
+
+	INIT_WORK (&cpad->touchpad.submit_urb, cpad_submit_int_urb, cpad);
+	schedule_delayed_work (&cpad->touchpad.submit_urb, HZ/4);
 }
 
-static inline void cpad_input_remove(struct cpad_context *cpad)
+static void cpad_input_remove(struct cpad_context *cpad)
 {
 	if (!disable_input)
 		input_unregister_device(&cpad->touchpad.idev);
@@ -688,8 +831,7 @@ static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 	struct cpad_context *cpad = urb->context;
 	unsigned char *data = cpad->touchpad.in.buffer;
 	struct input_dev *idev = &cpad->touchpad.idev;
-	int retval;
-	int w, pressure, finger_width, num_fingers;
+	int res, w, pressure, finger_width, num_fingers;
 
 	switch (urb->status) {
 	case 0:
@@ -702,7 +844,7 @@ static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 		goto resubmit;
 	}
 
-	if (disable_input || !cpad->touchpad.open)
+	if (disable_input)
 		goto resubmit;
 
 	w = data[0] & 0x0f;
@@ -717,7 +859,7 @@ static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 		case 1:
 			num_fingers = 3;
 			break;
-		case 2:
+		case 2:	/* pen detected, thread it as a finger */
 			break;
 		case 4 ... 15:
 			finger_width = w;
@@ -736,7 +878,8 @@ static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 
 	if (pressure > 0) {
 		input_report_abs (idev, ABS_X, (data[2] << 8) | data[3]);
-		input_report_abs (idev, ABS_Y, YMIN_NOMINAL + YMAX_NOMINAL - ((data[4] << 8) | data[5]));
+		input_report_abs (idev, ABS_Y, YMIN_NOMINAL + YMAX_NOMINAL -
+					((data[4] << 8) | data[5]));
 	}
 	input_report_abs (idev, ABS_PRESSURE, pressure);
 
@@ -749,31 +892,23 @@ static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 	input_report_key (idev, BTN_MIDDLE, data[1] & 0x08);
 	input_sync (idev);
 resubmit:
-	retval = usb_submit_urb (urb, GFP_ATOMIC);
-	if (retval)
-		err ("usb_submit_urb int in failed with result %d", retval);
-}
-
-static int cpad_input_open(struct input_dev *idev)
-{
-	struct cpad_context *cpad = idev->private;
-	cpad->touchpad.open++;
-	return 0;
-}
-
-static void cpad_input_close(struct input_dev *idev)
-{
-	struct cpad_context *cpad = idev->private;
-	cpad->touchpad.open--;
+	res = usb_submit_urb (urb, GFP_ATOMIC);
+	if (res)
+		err ("usb_submit_urb int in failed with result %d", res);
 }
 
 #else /* CONFIG_USB_CPADINPUT */
 
-static inline void cpad_input_init(struct cpad_context *cpad) { }
-static inline void cpad_input_remove(struct cpad_context *cpad) { }
+static void cpad_input_add(struct cpad_context *cpad)
+{
+	INIT_WORK (&cpad->touchpad.submit_urb, cpad_submit_int_urb, cpad);
+	schedule_delayed_work (&cpad->touchpad.submit_urb, HZ/4);
+}
 
-static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
+static void cpad_input_remove(struct cpad_context *cpad) { }
+
 /* data must always be fechted, otherwise cpad reconnects */
+static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 {
 	int retval;
 
@@ -791,6 +926,27 @@ static void cpad_input_callback(struct urb *urb, struct pt_regs *regs)
 
 #endif /* CONFIG_USB_CPADINPUT */
 
+/* data must always be fetched from the int endpoint, otherwise the cpad would
+ * reconnect to force driver reload, so this is always scheduled by probe
+ */
+static void cpad_submit_int_urb(void *arg)
+{
+	struct cpad_context *cpad = (struct cpad_context *) arg;
+	int res;
+
+	down (&cpad->sem);
+	res = usb_submit_urb (cpad->touchpad.in.urb, GFP_KERNEL);
+	if (res)
+		err ("usb_submit_urb int in failed with result %d", res);
+
+	/* when doing 'rmmod cpad' and then 'insmod cpad' immediately,
+	 * the first write urb to the bulk endpoints always times
+	 * out (kernel 2.6.3). This bug seems to be gone in 2.6.6 (?).
+	 * The following line makes sure the first urb has no use. */
+	cpad_nlcd_function(cpad, CPAD_R_LIGHT, 0);
+	up (&cpad->sem);
+}
+
 
 /*****************************************************************************
  *	cpad character device routines, based on:			     *
@@ -803,12 +959,18 @@ static int disable_cdev = 0;
 MODULE_PARM(disable_cdev, "i");
 MODULE_PARM_DESC(disable_cdev, "disable cPad character device");
 
+#define USB_CPAD_MINOR_BASE	66
+#define CPAD_DRIVER_NUM 	7
+
 /* character device prototypes */
 static int cpad_dev_open (struct inode *inode, struct file *file);
 static int cpad_dev_release (struct inode *inode, struct file *file);
-static ssize_t cpad_dev_read (struct file *file, char *buffer, size_t count, loff_t *ppos);
-static ssize_t cpad_dev_write (struct file *file, const char *ubuffer, size_t count, loff_t *ppos);
-static int cpad_dev_ioctl (struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg);
+static ssize_t cpad_dev_read (struct file *file, char *buffer, size_t count,
+					loff_t *ppos);
+static ssize_t cpad_dev_write (struct file *file, const char *ubuffer,
+					size_t count, loff_t *ppos);
+static int cpad_dev_ioctl (struct inode *inode, struct file *file,
+					unsigned int cmd, unsigned long arg);
 
 static struct file_operations cpad_fops = {
 	.owner =	THIS_MODULE,
@@ -826,7 +988,7 @@ static struct usb_class_driver cpad_class = {
 	.minor_base =	USB_CPAD_MINOR_BASE,
 };
 
-static inline void cpad_dev_init(struct cpad_context *cpad)
+static void cpad_dev_add(struct cpad_context *cpad)
 {
 	struct usb_interface *interface = cpad->interface;
 
@@ -839,10 +1001,11 @@ static inline void cpad_dev_init(struct cpad_context *cpad)
 		return;
 	}
 	cpad->char_dev.minor = interface->minor;
-	info ("USB Synaptics device now attached to USBcpad-%d", cpad->char_dev.minor);
+	info ("USB Synaptics device now attached to USBcpad-%d",
+							cpad->char_dev.minor);
 }
 
-static inline void cpad_dev_remove(struct cpad_context *cpad)
+static void cpad_dev_remove(struct cpad_context *cpad)
 {
 	struct usb_interface *interface = cpad->interface;
 
@@ -857,222 +1020,192 @@ static int cpad_dev_open (struct inode *inode, struct file *file)
 {
 	struct cpad_context *cpad = NULL;
 	struct usb_interface *interface;
-	int minor;
+	int minor, retval;
 
 	minor = iminor(inode);
 
 	/* prevent disconnects */
-	if (down_trylock (&disconnect_sem)) {
-		if (file->f_flags & O_NONBLOCK)
-			return -EBUSY;
-		else if (down_interruptible (&disconnect_sem))
-			return -EAGAIN;
-	}
+	retval = cpad_down (&disconnect_sem, file);
+	if (retval)
+		return retval;
 
 	interface = usb_find_interface (&cpad_driver, minor);
 	if (!interface) {
 		err ("error, can't find device for minor %d", minor);
-		up (&disconnect_sem);
-		return -ENODEV;
+		retval = -ENODEV;
+		goto error;
 	}
 
-	cpad = usb_get_intfdata(interface);
+	cpad = usb_get_intfdata (interface);
 	if (!cpad) {
-		up (&disconnect_sem);
-		return -ENODEV;
+		retval = -ENODEV;
+		goto error;
 	}
 
-	if (down_trylock (&cpad->sem)) {
-		if (file->f_flags & O_NONBLOCK) {
-			up (&disconnect_sem);
-			return -EBUSY;
-		}
-		else if (down_interruptible (&cpad->sem)) {
-			up (&disconnect_sem);
-			return -EAGAIN;
-		}
-	}
-	++cpad->char_dev.open;
+	down (&cpad->open_count_sem);
+	++cpad->open_count;
 	file->private_data = cpad;
-	up (&cpad->sem);
-
+	up (&cpad->open_count_sem);
+error:
 	up (&disconnect_sem);
-	return 0;
+	return retval;
 }
 
 static int cpad_dev_release (struct inode *inode, struct file *file)
 {
 	struct cpad_context *cpad = (struct cpad_context *)file->private_data;
+	int retval = 0;
 
 	if (cpad == NULL)
 		return -ENODEV;
 
-	down (&cpad->sem);
+	down (&cpad->open_count_sem);
 
-	if (cpad->char_dev.open <= 0) {
-		up (&cpad->sem);
-		return -ENODEV;
+	if (cpad->open_count <= 0) {
+		retval = -ENODEV;
+		goto error;
 	}
 
-	if (atomic_read (&cpad->display.busy))
-		wait_for_completion (&cpad->display.finished);
-
-	--cpad->char_dev.open;
-
-	if (!cpad->present && !cpad->char_dev.open) {
-		up (&cpad->sem);
+	if (!cpad->present && (cpad->open_count == 1)) {
+		up (&cpad->open_count_sem);
 		cpad_free_context (cpad);
 		return 0;
 	}
 
-	up (&cpad->sem);
-	return 0;
+	--cpad->open_count;
+error:
+	up (&cpad->open_count_sem);
+	return retval;
 }
 
-static ssize_t cpad_dev_read (struct file *file, char *buffer, size_t count, loff_t *ppos)
+static ssize_t cpad_dev_read (struct file *file, char *buffer, size_t count,
+					loff_t *ppos)
 {
 	struct cpad_context *cpad = (struct cpad_context *)file->private_data;
 	ssize_t bytes_read;
-	int res;
+	int retval;
 
-	if (down_trylock (&cpad->sem)) {
-		if (file->f_flags & O_NONBLOCK)
-			return -EAGAIN;
-		else if (down_interruptible (&cpad->sem))
-			return -ERESTARTSYS;
-	}
+	retval = cpad_down (&cpad->sem, file);
+	if (retval)
+		return retval;
 
 	if (!cpad->present) {
-		up (&cpad->sem);
-		return -ENODEV;
+		retval = -ENODEV;
+		goto error;
 	}
 
-	if (atomic_read (&cpad->display.busy)) {
-		if (file->f_flags & O_NONBLOCK) {
-			up (&cpad->sem);
-			return -EAGAIN;
-		}
-		res = cpad_wait_interruptible (cpad);
-		if (res) {
-			up (&cpad->sem);
-			return res;
-		}
-	}
+	retval = cpad_wait (cpad, file);
+	if (retval)
+		goto error;
 
-	res = cpad_check_display_urb_errors(cpad);
-	if (res) {
-		up (&cpad->sem);
-		return res;
-	}
+	retval = cpad_check_display_urb_errors(cpad);
+	if (retval)
+		goto error;
 
 	bytes_read = min ((int)count, cpad->display.in.urb->actual_length);
 	if (copy_to_user (buffer, cpad->display.in.buffer, bytes_read)) {
-		up (&cpad->sem);
-		return -EFAULT;
+		retval = -EFAULT;
+	} else {
+		retval = bytes_read;
 	}
-
+error:
 	up (&cpad->sem);
-	return bytes_read;
+	return retval;
 }
 
-static ssize_t cpad_dev_write (struct file *file, const char *ubuffer, size_t count, loff_t *ppos)
+static inline int cpad_dev_write_fillbuffer(struct cpad_context *cpad,
+				const unsigned char *ubuffer, size_t count)
 {
-	struct cpad_context *cpad = (struct cpad_context *)file->private_data;
-	struct cpad_endpoint *out = &cpad->display.out;
-	unsigned char *tmpbuf = cpad->display.tmpbuf;
-	unsigned char *tmpbuf_pos;
-	unsigned char *tbuffer_pos = out->buffer;
-	const char *ubuffer_pos = ubuffer;
-	size_t ulength, uremaining, actual_length;
+	unsigned char *out_buf = cpad->display.out.buffer;
+	size_t out_buffer_size = cpad->display.out.buffer_size;
+	unsigned char *param = cpad->display.tmpbuf;
+	size_t max_param_size = cpad->display.tmpbuf_size;
+	size_t param_size, actual_length;
 	unsigned char cmd;
-	int res;
-
-	if (down_trylock (&cpad->sem)) {
-		if (file->f_flags & O_NONBLOCK)
-			return -EAGAIN;
-		else if (down_interruptible (&cpad->sem))
-			return -ERESTARTSYS;
-	}
-
-	if (!cpad->present) {
-		up (&cpad->sem);
-		return -ENODEV;
-	}
-
-	if (count == 0) {
-		up (&cpad->sem);
-		return 0;
-	}
-
-	if (atomic_read (&cpad->display.busy)) {
-		if (file->f_flags & O_NONBLOCK) {
-			up (&cpad->sem);
-			return -EAGAIN;
-		}
-		res = cpad_wait_interruptible (cpad);
-		if (res) {
-			up (&cpad->sem);
-			return res;
-		}
-	}
-
-	cpad_fb_deactivate (cpad);
+	const unsigned char *ubuffer_orig = ubuffer;
 
 	/* get 1335 command first */
 	get_user(cmd, ubuffer);
-	ubuffer_pos++;
+	ubuffer++;
 	if (count == 1) {
-		/* no params */
-		*(tbuffer_pos++) = SEL_1335;
-		*(tbuffer_pos++) = cmd;
+		/* 1335 command without params */
+		*(out_buf++) = SEL_1335;
+		*(out_buf++) = cmd;
 		actual_length = 2;
 	}
 	else {
 		actual_length = 0;
-		uremaining = count - 1;
-		while (uremaining > 0) {
-			ulength = min (cpad->display.tmpbuf_size, uremaining);
-			if (actual_length+ulength > out->buffer_size)
+		count--;
+		while (count > 0) {
+			param_size = min (max_param_size, count);
+			if (actual_length+param_size+2 > out_buffer_size)
 				break;
 
-			/* copy the data from userspace into our buffer */
-			if (copy_from_user(tmpbuf, ubuffer_pos, ulength)) {
-				up (&cpad->sem);
+			if (copy_from_user(param, ubuffer, param_size)) {
 				return -EFAULT;
 			}
-			ubuffer_pos += ulength;
-			uremaining -= ulength;
+			ubuffer += param_size;
+			count -= param_size;
 
-			/* here we set the 1335 select, 1335 command, and reverse the params */
-			*(tbuffer_pos++) = SEL_1335;
-			*(tbuffer_pos++) = cmd;
-			for (tmpbuf_pos=tmpbuf+ulength-1; tmpbuf_pos>=tmpbuf; tmpbuf_pos--)
-				*(tbuffer_pos++) = *tmpbuf_pos;
-			actual_length += ulength + 2;
+			out_buf = cpad_1335_fillpacket(cmd, param, param_size,
+								out_buf);
+			actual_length += param_size + 2;
 		}
 	}
 
-	/* this urb was already set up, except for this write size */
-	out->urb->transfer_buffer_length = actual_length;
+	cpad->display.out.urb->transfer_buffer_length = actual_length;
+	return ubuffer-ubuffer_orig;
+}
 
-	res = usb_submit_urb(out->urb, GFP_KERNEL);
-	cpad->display.submit_res = res;
-	if (res) {
-		err ("failed submitting write urb, error %d", res);
+static ssize_t cpad_dev_write (struct file *file, const char *ubuffer,
+					size_t count, loff_t *ppos)
+{
+	struct cpad_context *cpad = (struct cpad_context *)file->private_data;
+	int retval, length;
+
+	if (count == 0)
+		return 0;
+
+	retval = cpad_down (&cpad->sem, file);
+	if (retval)
+		return retval;
+
+	if (!cpad->present) {
+		retval = -ENODEV;
+		goto error;
+	}
+
+	retval = cpad_wait (cpad, file);
+	if (retval)
+		goto error;
+
+	cpad_fb_deactivate (cpad);
+
+	length = cpad_dev_write_fillbuffer (cpad, ubuffer, count);
+	if (length < 0) {
+		retval = length;
+		goto error;
+	}
+
+	retval = usb_submit_urb(cpad->display.out.urb, GFP_KERNEL);
+	cpad->display.submit_res = retval;
+	if (retval) {
+		err ("failed submitting write urb, error %d", retval);
 	} else {
 		init_completion (&cpad->display.finished);
 		atomic_set (&cpad->display.busy, 1);
 		cpad_setup_timeout (cpad);
-		res = ubuffer_pos - ubuffer;
+		retval = length;
 	}
-
+error:
 	up (&cpad->sem);
-	return res;
+	return retval;
 }
 
 int cpad_driver_num = CPAD_DRIVER_NUM;
 
-static int cpad_dev_ioctl (struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
+static int cpad_dev_ioctl (struct inode *inode, struct file *file,
+					unsigned int cmd, unsigned long arg)
 {
 	struct cpad_context *cpad = (struct cpad_context *)file->private_data;
 	unsigned char cval = 0;
@@ -1080,12 +1213,13 @@ static int cpad_dev_ioctl (struct inode *inode, struct file *file, unsigned int 
 	void *rval = NULL;
 	int res = 0;
 
-	if (down_interruptible (&cpad->sem))
-		return -ERESTARTSYS;
+	res = cpad_down (&cpad->sem, file);
+	if (res)
+		return res;
 
 	if (!cpad->present) {
-		up (&cpad->sem);
-		return -ENODEV;
+		res = -ENODEV;
+		goto error;
 	}
 
 	/* read data from user */
@@ -1098,8 +1232,8 @@ static int cpad_dev_ioctl (struct inode *inode, struct file *file, unsigned int 
 			get_user(ival, (int *) arg);
 			break;
 		default:
-			up (&cpad->sem);
-			return -ENOIOCTLCMD;
+			res = -ENOIOCTLCMD;
+			goto error;
 		}
 	}
 
@@ -1145,11 +1279,10 @@ static int cpad_dev_ioctl (struct inode *inode, struct file *file, unsigned int 
 		break;
 
 	default:
-		up (&cpad->sem);
-		return -ENOIOCTLCMD;
+		res = -ENOIOCTLCMD;
 	}
+error:
 	up (&cpad->sem);
-
 	if (res < 0)
 		return res;
 
@@ -1163,8 +1296,8 @@ static int cpad_dev_ioctl (struct inode *inode, struct file *file, unsigned int 
 
 #else /* CONFIG_USB_CPADDEV */
 
-static inline void cpad_dev_init(struct cpad_context *cpad) { }
-static inline void cpad_dev_remove(struct cpad_context *cpad) { }
+static void cpad_dev_add(struct cpad_context *cpad) { }
+static void cpad_dev_remove(struct cpad_context *cpad) { }
 
 #endif /* CONFIG_USB_CPADDEV */
 
@@ -1180,13 +1313,23 @@ MODULE_PARM(disable_procfs, "i");
 MODULE_PARM_DESC(disable_procfs, "disable cPad procfs interface");
 
 static struct proc_dir_entry *cpad_procfs_root;
-static atomic_t cpad_procfs_count;
 
 /* procfs prototypes */
-static read_proc_t cpad_procfs_read;
-static write_proc_t cpad_procfs_write;
+static int cpad_procfs_open(struct inode *inode, struct file *file);
+static int cpad_procfs_release(struct inode *inode, struct file *file);
+static int cpad_procfs_read(struct file *file, char __user *buf,
+				size_t nbytes, loff_t *ppos);
+static int cpad_procfs_write(struct file *file, const char __user *buffer,
+				size_t count, loff_t *ppos);
 
-static inline void cpad_procfs_init(void)
+struct file_operations cpad_proc_fops = {
+	.open = cpad_procfs_open,
+	.release = cpad_procfs_release,
+	.read = cpad_procfs_read,
+	.write = cpad_procfs_write,
+};
+
+static void cpad_procfs_init(void)
 {
 	if (disable_procfs)
 		return;
@@ -1195,185 +1338,354 @@ static inline void cpad_procfs_init(void)
 	if (! cpad_procfs_root)
 	{
 		disable_procfs = 1;
-		err("can't create /proc/driver/cpad\n");
+		err("can't create /proc/driver/cpad");
 		return;
 	}
 	cpad_procfs_root->owner = THIS_MODULE;
-	atomic_set(&cpad_procfs_count, 0);
 }
 
-static inline void cpad_procfs_remove(void)
+static void cpad_procfs_exit(void)
 {
 	if (disable_procfs)
 		return;
 	remove_proc_entry("driver/cpad", NULL);
 }
 
-static inline void cpad_procfs_add(struct cpad_context *cpad)
+static void cpad_procfs_add(struct cpad_context *cpad)
 {
 	struct cpad_procfs *procfs = &cpad->procfs;
 
 	if (disable_procfs)
 		return;
 
-	procfs->num = atomic_inc_and_test(&cpad_procfs_count);
-	sprintf(procfs->name, "%i", procfs->num);
-	procfs->entry = create_proc_read_entry(procfs->name,
-				S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
-				cpad_procfs_root, cpad_procfs_read, cpad);
+	if (cpad->table_index < 0) {
+		err("cpad_table is full, proc file disabled");
+		cpad->procfs.disable = 1;
+		return;
+	}
+
+	sprintf(procfs->name, "%i", cpad->table_index);
+	procfs->entry = create_proc_entry(procfs->name,
+					S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
+					cpad_procfs_root);
 	if (! procfs->entry)
 	{
-		err("can't create /proc/driver/cpad/%s\n", procfs->name);
+		err("can't create /proc/driver/cpad/%s", procfs->name);
+		cpad->procfs.disable = 1;
 		return;
 	}
 	procfs->entry->owner = THIS_MODULE;
-	procfs->entry->write_proc = cpad_procfs_write;
+	procfs->entry->data = (void *) cpad->table_index;
+	procfs->entry->proc_fops = &cpad_proc_fops;
 }
 
-static inline void cpad_procfs_del(struct cpad_context *cpad)
+static void cpad_procfs_remove(struct cpad_context *cpad)
 {
-	if (disable_procfs)
+	if (disable_procfs || cpad->procfs.disable)
 		return;
-	if (cpad->procfs.entry)
-		remove_proc_entry(cpad->procfs.name, cpad_procfs_root);
+	remove_proc_entry(cpad->procfs.name, cpad_procfs_root);
+	cpad->procfs.disable = 1;
 }
 
-static int cpad_procfs_read(char *page, char **start, off_t off, 
-			    int count, int *eof, void *data)
+static int cpad_procfs_open(struct inode *inode, struct file *file)
 {
-	struct cpad_context *cpad = (struct cpad_context *) data;
-	char *page_pos = page;
+	struct cpad_context *cpad;
+	static struct proc_dir_entry *entry;
+	int retval = 0;
+	int index = 0;
 
-	if (down_interruptible (&cpad->sem))
-		return -ERESTARTSYS;
+	retval = cpad_down (&disconnect_sem, file);
+	if (retval)
+		return retval;
 
-	page_pos += sprintf(page_pos, "minor:      %i\n", (int) cpad->char_dev.minor);
-	page_pos += sprintf(page_pos, "lcd:        %i\n",
-			    cpad_nlcd_function(cpad, CPAD_R_LCD, 0));
-	page_pos += sprintf(page_pos, "backlight:  %i\n",
-			    cpad_nlcd_function(cpad, CPAD_R_LIGHT, 0));
-	page_pos += sprintf(page_pos, "framerate:  %i\n", cpad->fb.rate);
-	page_pos += sprintf(page_pos, "dithering:  %i\n", cpad->fb.dither);
-	page_pos += sprintf(page_pos, "brightness: %i\n", cpad->fb.brightness);
-	page_pos += sprintf(page_pos, "invert:     %i\n", cpad->fb.invert);
+	entry = PDE(inode);
+	index = (int) entry->data;
+	if ((index < 0) || (index >= MAX_DEVICES)) {
+		retval = -ENODEV;
+		goto error;
+	}
 
-	up(&cpad->sem);
+	cpad = cpad_table[index];
+	if ((!cpad) || (cpad->procfs.entry != entry)) {
+		retval = -ENODEV;
+		goto error;
+	}
 
-	*eof = 1;
-	return page_pos - page;
+	down (&cpad->open_count_sem);
+	++cpad->open_count;
+	++cpad->procfs.open;
+	file->private_data = cpad;
+	up (&cpad->open_count_sem);
+error:
+	up (&disconnect_sem);
+	return retval;
 }
 
-static int cpad_procfs_write(struct file *file, const char *buffer,
-			     unsigned long count, void *data)
+static int cpad_procfs_release(struct inode *inode, struct file *file)
 {
-	struct cpad_context *cpad = (struct cpad_context *) data;
+	struct cpad_context *cpad = (struct cpad_context *)file->private_data;
+	int retval = 0;
+
+	if (cpad == NULL)
+		return -ENODEV;
+
+	down (&cpad->open_count_sem);
+
+	if (cpad->open_count <= 0) {
+		retval = -ENODEV;
+		goto error;
+	}
+
+	if (!cpad->present) {
+		if (cpad->procfs.open == 1) {
+			cpad_procfs_remove (cpad);
+		}
+		if (cpad->open_count == 1) {
+			up (&cpad->open_count_sem);
+			cpad_free_context (cpad);
+			return 0;
+		}
+	}
+
+	--cpad->open_count;
+	--cpad->procfs.open;
+error:
+	up (&cpad->open_count_sem);
+	return retval;
+}
+
+static char *cpad_procfs_read_generic(struct cpad_context *cpad, char *pos)
+{
+	int i;
+
+	pos += sprintf(pos, "eeprom:     ");
+	cpad_nlcd_function(cpad, CPAD_R_ROM, 0);
+	for (i=2; i < cpad->display.in.urb->actual_length; i++)
+		pos += sprintf(pos, " %02x",
+				cpad->display.in.buffer[i]);
+	pos += sprintf(pos, "\n");
+
+	pos += sprintf(pos, "lcd:         %i\n",
+				cpad_nlcd_function(cpad, CPAD_R_LCD, 0));
+	pos += sprintf(pos, "backlight:   %i\n",
+				cpad_nlcd_function(cpad, CPAD_R_LIGHT, 0));
+	return pos;
+}
+
+static char *cpad_procfs_read_input(struct cpad_context *cpad, char *pos)
+{
+#ifdef CONFIG_USB_CPADINPUT
+	struct input_handle *handle;
+
+	if (disable_input) {
+		pos += sprintf(pos, "input dev:   disabled\n");
+	} else {
+		pos += sprintf(pos, "input dev:  ");
+		list_for_each_entry(handle, &cpad->touchpad.idev.h_list, d_node)
+			pos += sprintf(pos, " %s", handle->name);
+		pos += sprintf(pos, "\n");
+	}
+#else
+	pos += sprintf(pos, "input dev:   not compiled in\n");
+#endif
+	return pos;
+}
+
+static char *cpad_procfs_read_cdev(struct cpad_context *cpad, char *pos)
+{
+#ifdef CONFIG_USB_CPADDEV
+	if (disable_cdev || cpad->char_dev.disable) {
+		pos += sprintf(pos, "cdev:        disabled\n");
+	} else {
+		pos += sprintf(pos, "cdev minor:  %i\n",
+					(int) cpad->char_dev.minor);
+	}
+#else
+	pos += sprintf(pos, "cdev:        not comliped in\n");
+#endif
+	return pos;
+}
+
+static char *cpad_procfs_read_fb(struct cpad_context *cpad, char *pos)
+{
+#ifdef CONFIG_USB_CPADFB
+	if (disable_fb || cpad->fb.disable) {
+		pos += sprintf(pos, "framebuffer: disabled\n");
+	} else {
+		pos += sprintf(pos, "fb nr.:      %i\n", cpad->fb.node);
+		pos += sprintf(pos, "framerate:   %i\n", cpad->fb.rate);
+		pos += sprintf(pos, "dithering:   %i\n", cpad->fb.dither);
+		pos += sprintf(pos, "brightness:  %i\n", cpad->fb.brightness);
+		pos += sprintf(pos, "invert:      %i\n", cpad->fb.invert);
+		pos += sprintf(pos, "onlychanged: %i\n", cpad->fb.onlychanged);
+		pos += sprintf(pos, "onlyvisible: %i\n", cpad->fb.onlyvisible);
+	}
+#else
+	pos += sprintf(pos, "framebuffer: not comliped in\n");
+#endif
+	return pos;
+}
+
+static int cpad_procfs_read(struct file *file, char __user *buf,
+				size_t nbytes, loff_t *ppos)
+{
+	struct cpad_context *cpad = (struct cpad_context *)file->private_data;
 	char *page = (char*) __get_free_page(GFP_KERNEL);
 	char *page_pos = page;
-	int remain = count;
-	int value = 0;
+	int retval;
 
 	if (!page)
 		return -ENOMEM;
-	count = min(count, PAGE_SIZE-1);
-	if (copy_from_user(page, buffer, count))
-		return -EFAULT;
-	page[count] = '\0';
 
-	if (down_interruptible (&cpad->sem))
-		return -ERESTARTSYS;
+	retval = cpad_down (&cpad->sem, file);
+	if (retval)
+		goto error;
 
-	while (remain) {
-		if (sscanf(page_pos, " flash : %i", &value) == 1)
-			cpad_flash(cpad, value);
-		else if (sscanf(page_pos, " framerate : %i", &value) == 1) {
-			if (value <= 0)
-				cpad_fb_deactivate (cpad);
-			else
-				cpad_fb_activate (cpad, value);
-		}
-		else if (sscanf(page_pos, " dithering : %i", &value) == 1) {
-			value = max(value, 0);
-			cpad->fb.dither = min(value, 3);
-		}
-		else if (sscanf(page_pos, " brightness : %i", &value) == 1) {
-			value = max(value, 0);
-			cpad->fb.brightness = min(value, 10000);
-		}
-		else if (sscanf(page_pos, " invert : %i", &value) == 1)
-			cpad->fb.invert = (value <= 0) ? 0 : 1;
-
-		do {
-			++page_pos;
-			--remain;
-		}
-		while (remain && *(page_pos-1) != '\n' && *(page_pos-1) != ';');
+	if (!cpad->present) {
+		retval = -ENODEV;
+		goto error;
 	}
+
+	page_pos = cpad_procfs_read_generic (cpad, page_pos);
+	page_pos = cpad_procfs_read_input (cpad, page_pos);
+	page_pos = cpad_procfs_read_cdev (cpad, page_pos);
+	page_pos = cpad_procfs_read_fb (cpad, page_pos);
 
 	up(&cpad->sem);
 
+	retval = min(max((int)(page_pos - page - *ppos), 0), (int)nbytes);
+	if (retval == 0)
+		goto error;
+	if (copy_to_user(buf, page + *ppos, retval)) {
+		retval = -EFAULT;
+		goto error;
+	}
+	*ppos += retval;
+error:
 	free_page((unsigned long) page);
-	return count;
+	return retval;
+}
+
+static inline void cpad_procfs_write_command(struct cpad_context *cpad,
+							char *cmd)
+{
+	int value;
+	char str[16];
+
+	if (sscanf(cmd, " flash : %i", &value) == 1)
+		cpad_flash(cpad, value);
+	else if (sscanf(cmd, " framerate : %i", &value) == 1) {
+		if (value <= 0)
+			cpad_fb_deactivate (cpad);
+		else
+			cpad_fb_activate (cpad, value);
+	} else if (sscanf(cmd, " dithering : %i", &value) == 1) {
+		cpad->fb.dither = min(max(value, 0), 3);
+	} else if (sscanf(cmd, " brightness : %i", &value) == 1) {
+		cpad->fb.brightness = min(max(value, 0), 10000);
+	} else if (sscanf(cmd, " invert : %i", &value) == 1) {
+		cpad->fb.invert = (value <= 0) ? 0 : 1;
+	} else if (sscanf(cmd, " onlychanged : %i", &value) == 1) {
+		cpad->fb.onlychanged = (value <= 0) ? 0 : 1;
+	} else if (sscanf(cmd, " onlyvisible : %i", &value) == 1) {
+		cpad->fb.onlyvisible = (value <= 0) ? 0 : 1;
+	} else if (sscanf(cmd, " %16s", str) == 1) {
+		if (!strcmp("oneframe", str))
+			cpad_fb_oneframe(cpad);
+	}
+}
+
+static int cpad_procfs_write(struct file *file, const char __user *buffer,
+				size_t count, loff_t *ppos)
+{
+	struct cpad_context *cpad = (struct cpad_context *)file->private_data;
+	char *page = (char*) __get_free_page(GFP_KERNEL);
+	char *page_pos = page;
+	int retval;
+
+	if (!page)
+		return -ENOMEM;
+
+	count = min(count, (size_t)(PAGE_SIZE-1));
+	if (copy_from_user(page, buffer, count)) {
+		retval = -EFAULT;
+		goto error2;
+	}
+	page[count] = '\0';
+
+	retval = cpad_down (&cpad->sem, file);
+	if (retval)
+		goto error2;
+
+	if (!cpad->present) {
+		retval = -ENODEV;
+		goto error1;
+	}
+
+	retval = count;
+	while (count) {
+		cpad_procfs_write_command (cpad, page_pos);
+
+		do {
+			++page_pos;
+			--count;
+		} while (count && *(page_pos-1) != '\n' &&
+						*(page_pos-1) != ';');
+	}
+error1:
+	up(&cpad->sem);
+error2:
+	free_page((unsigned long) page);
+	return retval;
 }
 
 #else /* CONFIG_USB_CPADPROCFS */
 
-static inline void cpad_procfs_init(void) { }
-static inline void cpad_procfs_remove(void) { }
-static inline void cpad_procfs_add(strstatic struct fb_infouct cpad_context *cpad) { }
-static inline void cpad_procfs_del(struct cpad_context *cpad) { }
+static void cpad_procfs_init(void) { }
+static void cpad_procfs_exit(void) { }
+static void cpad_procfs_add(struct cpad_context *cpad) { }
+static void cpad_procfs_remove(struct cpad_context *cpad) { }
 
 #endif /* CONFIG_USB_CPADPROCFS */
 
 
 /*****************************************************************************
- *	framebuffer routines, based on:					     *
+ *	frame buffer routines, based on:				     *
  *		drivers/video/vfb.c					     *
  *		drivers/usb/media/vicam.c	(mmap functions)	     *
  *****************************************************************************/
 
 #ifdef CONFIG_USB_CPADFB
 
-/*
- * TODO:
- *	support for FB_VISUAL_MONO01
- *	only send changed pixels (probably with pte_young and pte_mkyoung)
- *	include fb_check_var, fb_set_par, fb_pan_display functions in cpad_fb_ops
- *	support different bpp
- */
-
 static int disable_fb = 0;
 MODULE_PARM(disable_fb, "i");
-MODULE_PARM_DESC(disable_fb, "disable cPad framebuffer device");
+MODULE_PARM_DESC(disable_fb, "disable cPad frame buffer device");
+
+static int max_bpp = 24;
+MODULE_PARM(max_bpp, "i");
+MODULE_PARM_DESC(max_bpp, "maximum bpp, set to 1 to reduce mem usage");
 
 static struct fb_var_screeninfo cpad_fb_default_var = {
 	.xres =		240,
 	.yres =		160,
 	.xres_virtual =	240,
 	.yres_virtual =	160,
-	.bits_per_pixel = 24,
-	.red =		{ 0, 8, 0 },
-      	.green =	{ 8, 8, 0 },
-      	.blue =		{ 16, 8, 0 },
-      	.activate =	FB_ACTIVATE_TEST,
+	.bits_per_pixel = 1,
+	.red =		{ 0, 1, 0 },
+      	.green =	{ 0, 1, 0 },
+      	.blue =		{ 0, 1, 0 },
+      	.activate =	FB_ACTIVATE_NOW,
       	.height =	38,
       	.width =	46,
-      	.pixclock =	200000,
-      	.left_margin =	16,
-      	.right_margin =	16,
-      	.upper_margin =	8,
-      	.lower_margin =	8,
-      	.hsync_len =	16,
-      	.vsync_len =	2,
       	.vmode =	FB_VMODE_NONINTERLACED,
 };
 
 static struct fb_fix_screeninfo cpad_fb_default_fix = {
 	.id =		"cPad FB",
 	.type =		FB_TYPE_PACKED_PIXELS,
-	.visual =	FB_VISUAL_TRUECOLOR,
+	.visual =	FB_VISUAL_MONO01,
 	.accel =	FB_ACCEL_NONE,
-	.line_length =	240*3,
-	.smem_len = 	155648,
+	.line_length =	240/8,
 };
 
 static int cpad_fb_dither2[2][2] = 	{{1, 3},
@@ -1393,24 +1705,35 @@ static int cpad_fb_dither8[8][8] = 	{{ 1, 33,  9, 41,  3, 35, 11, 43},
 					 {16, 48,  8, 40, 14, 46,  6, 38},
 					 {64, 32, 56, 24, 62, 30, 54, 22}};
 
-/* framebuffer device prototypes */
+/* frame buffer device prototypes */
 static int cpad_fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
-			     u_int transp, struct fb_info *info);
+					u_int transp, struct fb_info *info);
+static int cpad_fb_open(struct fb_info *info, int user);
+static int cpad_fb_release(struct fb_info *info, int user);
 static int cpad_fb_mmap(struct fb_info *info, struct file *file,
-		    struct vm_area_struct *vma);
-static void cpad_fb_drawimage(void *arg);
+			struct vm_area_struct *vma);
+static void cpad_fb_sendimage(void *arg);
+int cpad_fb_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
+				unsigned long arg, struct fb_info *info);
+int cpad_fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info);
+int cpad_fb_set_par(struct fb_info *info);
 
 static struct fb_ops cpad_fb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_setcolreg	= cpad_fb_setcolreg,
+	.fb_check_var	= cpad_fb_check_var,
+	.fb_set_par	= cpad_fb_set_par,
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
 	.fb_cursor	= soft_cursor,
+	.fb_open	= cpad_fb_open,
+	.fb_release	= cpad_fb_release,
 	.fb_mmap	= cpad_fb_mmap,
+	.fb_ioctl	= cpad_fb_ioctl,
 };
 
-static inline void cpad_fb_init(struct cpad_context *cpad)
+static void cpad_fb_add(struct cpad_context *cpad)
 {
 	struct fb_info *info = &cpad->fb.info;
 	u_long vsize, size;
@@ -1419,10 +1742,22 @@ static inline void cpad_fb_init(struct cpad_context *cpad)
 	if (disable_fb)
 		return;
 
-	vsize = cpad_fb_default_fix.smem_len;
+	if (cpad->table_index < 0) {
+		err("cpad_table is full, framebuffer disabled");
+		cpad->fb.disable = 1;
+		return;
+	}
+
+	if (max_bpp == 1) {
+		vsize = 8192;
+	} else {
+		vsize = 118784;
+	}
+
+	cpad_fb_default_fix.smem_len = vsize;
 	if (!(cpad->fb.videomemory = vmalloc(vsize))) {
 		cpad->fb.disable = 1;
-		err("not enough memory for framebuffer");
+		err("not enough memory for frame buffer");
 		return;
 	}
 
@@ -1445,26 +1780,34 @@ static inline void cpad_fb_init(struct cpad_context *cpad)
 	info->par = cpad;
 
 	if (register_framebuffer(&cpad->fb.info) < 0) {
-		vfree(cpad->fb.videomemory);
+		cpad_fb_free (cpad);
 		cpad->fb.disable = 1;
-		err("couldn't register framebuffer");
+		err("couldn't register frame buffer");
 		return;
 	}
 
+	cpad->fb.node = info->node;
 	cpad->fb.brightness = 200;
 	cpad->fb.dither = 3;
+	cpad->fb.onlyvisible = 1;
 }
 
-static inline void cpad_fb_remove(struct cpad_context *cpad)
+static void cpad_fb_remove(struct cpad_context *cpad)
 {
-	unsigned long adr, size;
-
 	if (disable_fb || cpad->fb.disable)
 		return;
 
-	cpad_fb_deactivate (cpad);
+	cpad_fb_free (cpad);
+	unregister_framebuffer (&cpad->fb.info);
+}
 
-	unregister_framebuffer(&cpad->fb.info);
+static void cpad_fb_free (struct cpad_context *cpad)
+{
+	unsigned long adr, size;
+
+	if (!cpad->fb.videomemory)
+		return;
+
 	adr = (unsigned long) cpad->fb.videomemory;
 	size = cpad->fb.info.fix.smem_len;
 	while ((long) size > 0) {
@@ -1473,6 +1816,7 @@ static inline void cpad_fb_remove(struct cpad_context *cpad)
 		size -= PAGE_SIZE;
 	}
 	vfree(cpad->fb.videomemory);
+	cpad->fb.videomemory = 0;
 }
 
 static void cpad_fb_activate(struct cpad_context *cpad, int rate)
@@ -1486,34 +1830,84 @@ static void cpad_fb_activate(struct cpad_context *cpad, int rate)
 		return;
 
 	cpad->fb.active = 1;
-	init_completion (&cpad->fb.draw_finished);
-	INIT_WORK (&cpad->fb.drawimage, cpad_fb_drawimage, cpad);
-	schedule_work (&cpad->fb.drawimage);
+	init_completion (&cpad->fb.finished);
+	INIT_WORK (&cpad->fb.sendimage, cpad_fb_sendimage, cpad);
+	schedule_work (&cpad->fb.sendimage);
 }
 
 static void cpad_fb_deactivate(struct cpad_context *cpad)
 {
 	if (cpad->fb.active) {
 		cpad->fb.active = 0;
-		wait_for_completion(&cpad->fb.draw_finished);
+		if (!cancel_delayed_work(&cpad->fb.sendimage)) 
+			wait_for_completion (&cpad->fb.finished);
 		cpad->fb.rate = 0;
 	}
 }
 
-static int cpad_fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
-			     u_int transp, struct fb_info *info)
+static int cpad_fb_open(struct fb_info *info, int user)
 {
-	if (regno >= 16)
-		return 1;
+	struct cpad_context *cpad = (struct cpad_context *)info->par;
+	int retval = 0;
+	int index;
 
-	red   >>= 8;
-	green >>= 8;
-	blue  >>= 8;
-	((u32 *)(info->pseudo_palette))[regno] =
-		(red   << info->var.red.offset)   |
-		(green << info->var.green.offset) |
-		(blue  << info->var.blue.offset);
-	return 0;
+	if (cpad == NULL)
+		return -ENODEV;
+
+	if (down_interruptible (&disconnect_sem))
+		return -ERESTARTSYS;
+
+	index = cpad->table_index;
+	if ((index < 0) || (index >= MAX_DEVICES)) {
+		retval = -ENODEV;
+		goto error;
+	}
+
+	if ((cpad != cpad_table[index]) || (&cpad->fb.info != info)) {
+		retval = -ENODEV;
+		goto error;
+	}
+
+	down (&cpad->open_count_sem);
+	++cpad->open_count;
+	++cpad->fb.open;
+	up (&cpad->open_count_sem);
+error:
+	up (&disconnect_sem);
+	return retval;
+}
+
+static int cpad_fb_release(struct fb_info *info, int user)
+{
+	struct cpad_context *cpad = (struct cpad_context *)info->par;
+	int retval = 0;
+
+	if (cpad == NULL)
+		return -ENODEV;
+
+	down (&cpad->open_count_sem);
+
+	if (cpad->fb.open <= 0) {
+		retval = -ENODEV;
+		goto error;
+	}
+
+	if (!cpad->present) {
+		if (cpad->fb.open == 1) {
+			cpad_fb_remove (cpad);
+		}
+		if (cpad->open_count == 1) {
+			up (&cpad->open_count_sem);
+			cpad_free_context (cpad);
+			return 0;
+		}
+	}
+
+	--cpad->open_count;
+	--cpad->fb.open;
+error:
+	up (&cpad->open_count_sem);
+	return retval;
 }
 
 static int cpad_fb_mmap(struct fb_info *info, struct file *file,
@@ -1531,7 +1925,7 @@ static int cpad_fb_mmap(struct fb_info *info, struct file *file,
 
 	pos = (unsigned long) info->screen_base;
 	while (size > 0) {
-		kva = (unsigned long) page_address(vmalloc_to_page((void *)pos));
+		kva = (unsigned long)page_address(vmalloc_to_page((void *)pos));
 		kva |= pos & (PAGE_SIZE-1);
 		page = __pa(kva);
 		if (remap_page_range(vma, start, page, PAGE_SIZE, PAGE_SHARED))
@@ -1548,148 +1942,432 @@ static int cpad_fb_mmap(struct fb_info *info, struct file *file,
 	return 0;
 }
 
-static void cpad_fb_drawimage(void *arg) {
+static int cpad_fb_sendurb(struct cpad_context *cpad, int length)
+{
+	int res;
+
+	cpad->display.out.urb->transfer_buffer_length = length;
+	res = usb_submit_urb(cpad->display.out.urb, GFP_KERNEL);
+	cpad->display.submit_res = res;
+	if (res) {
+		err("usb_submit_urb failed, error %d. deactivating "
+						"frame buffer", res);
+		return res;
+	}
+	init_completion (&cpad->display.finished);
+	atomic_set (&cpad->display.busy, 1);
+	cpad_setup_timeout (cpad);
+	wait_for_completion (&cpad->display.finished);
+	res = cpad_check_display_urb_errors(cpad);
+	if (res) {
+		err("sending urb failed, error %d. deactivating "
+						"frame buffer", res);
+		return res;
+	}
+	return 0;
+}
+
+static int cpad_fb_setcursor(struct cpad_context *cpad, int cursor)
+{
+	unsigned char *out_buf = cpad->display.out.buffer;
+
+	*(out_buf++) = SEL_1335;
+	*(out_buf++) = CSRW_1335;
+	*(out_buf++) = cursor >> 8;
+	*(out_buf++) = cursor & 0xff;
+	return cpad_fb_sendurb(cpad, 4);
+}
+
+static inline int cpad_fb_dither(int x, int y, int grey, int maxgrey,
+							int dither)
+{
+	switch (dither) {
+	case 0:	return (2*grey > maxgrey) ? 0 : 1;
+	case 1:	return (5*grey > cpad_fb_dither2[x%2][y%2]*maxgrey) ? 0 : 1;
+	case 2:	return (17*grey > cpad_fb_dither4[x%4][y%4]*maxgrey) ? 0 : 1;
+	case 3:	return (65*grey > cpad_fb_dither8[x%8][y%8]*maxgrey) ? 0 : 1;
+	}
+}
+
+static inline unsigned char *cpad_fb_convert_line(struct cpad_context *cpad,
+			int line, unsigned char *vmem, unsigned char *param)
+{
+	int byte, bit, grey, black;
+	int maxgrey = 255*10;
+	int x = 0;
+
+	for (byte=0; byte<30; byte++)
+		for (bit=7; bit>=0; bit--) {
+			grey = 3*vmem[0] + 6*vmem[1] + vmem[2];
+			grey = min((grey*cpad->fb.brightness)/100, maxgrey);
+
+			black = cpad_fb_dither(x, line, grey, maxgrey,
+							cpad->fb.dither);
+
+			if (cpad->fb.invert)
+				black = !black;
+
+			if (black) {
+				set_bit (bit, (unsigned long *) &param[byte]);
+			}
+			else {
+				clear_bit (bit, (unsigned long *) &param[byte]);
+			}
+			vmem += 3;
+			x++;
+		}
+
+	return vmem;
+}
+
+static inline unsigned char *cpad_fb_fillpacket(unsigned char *param,
+			size_t param_size, unsigned char *out_buf, int *changed)
+{
+	unsigned char *point;
+
+	*changed = param_size;
+	*(out_buf++) = SEL_1335;
+	*(out_buf++) = MWRITE_1335;
+	for (point=param+param_size-1; point>=param; point--) {
+		if (*out_buf == *point) {
+			(*changed)--;
+		} else {
+			*out_buf = *point;
+		}
+		out_buf++;
+	}
+	return out_buf;
+}
+
+static inline void cpad_fb_oneframe_1bpp(struct cpad_context *cpad,
+							int *urb_size)
+{
+	unsigned char *param = cpad->fb.videomemory;
+	unsigned char *out_buf = cpad->display.out.buffer;
+	int line, maxline;
+
+	if (cpad->fb.onlyvisible) {
+		maxline = 160;
+	} else {
+		maxline = 273;
+	}
+
+	for (line=0; line<maxline; line++) {
+		out_buf = cpad_1335_fillpacket(MWRITE_1335, param, 30, out_buf);
+		param += 30;
+	}
+
+	if (cpad->fb.onlyvisible) {
+		*urb_size = 160*32;
+	} else {
+		cpad_1335_fillpacket (MWRITE_1335, param, 2, out_buf);
+		*urb_size = 273*32 + 4;
+	}
+}
+
+static inline void cpad_fb_oneframe_24bpp(struct cpad_context *cpad,
+							int *urb_size)
+{
+	unsigned char *param = cpad->display.tmpbuf;
+	unsigned char *out_buf = cpad->display.out.buffer;
+	unsigned char *vmem = cpad->fb.videomemory;
+	int line;
+
+	for (line=0; line<160; line++) {
+		vmem = cpad_fb_convert_line (cpad, line, vmem, param);
+		out_buf = cpad_1335_fillpacket(MWRITE_1335, param, 30, out_buf);
+	}
+	*urb_size = 160*32;
+}
+
+static inline void cpad_fb_oneframe_1bpp_onlychanged(struct cpad_context *cpad,
+						int *firstline, int *urb_size)
+{
+	unsigned char *param = cpad->fb.videomemory;
+	unsigned char *out_buf = cpad->fb.buffer;
+	int line, changed, maxline;
+	int lastline = 0;
+	int gotfirstline = 0;
+
+	if (cpad->fb.onlyvisible) {
+		maxline = 160;
+	} else {
+		maxline = 274;
+	}
+
+	for (line=0; line<maxline; line++) {
+		out_buf = cpad_fb_fillpacket (param, (line==273) ? 2 : 30,
+							out_buf, &changed);
+		param += 30;
+		if (changed) {
+			if (gotfirstline) {
+				lastline = line;
+			} else {
+				*firstline = line;
+				lastline = line;
+				gotfirstline = 1;
+			}
+		}
+	}
+
+	if (gotfirstline) {
+		*urb_size = (lastline - *firstline + 1) * 32;
+		if (lastline == 273)
+			*urb_size -= 28;
+	} else {
+		*urb_size = 0;
+	}
+}
+
+static inline void cpad_fb_oneframe_24bpp_onlychanged(struct cpad_context *cpad,
+						int *firstline, int *urb_size)
+{
+	unsigned char *param = cpad->display.tmpbuf;
+	unsigned char *out_buf = cpad->fb.buffer;
+	unsigned char *vmem = cpad->fb.videomemory;
+	int line, changed;
+	int lastline = 0;
+	int gotfirstline = 0;
+
+	for (line=0; line<160; line++) {
+		vmem = cpad_fb_convert_line (cpad, line, vmem, param);
+		out_buf = cpad_fb_fillpacket (param, 30, out_buf, &changed);
+		if (changed) {
+			if (gotfirstline) {
+				lastline = line;
+			} else {
+				*firstline = line;
+				lastline = line;
+				gotfirstline = 1;
+			}
+		}
+	}
+
+	if (gotfirstline) {
+		*urb_size = (lastline - *firstline + 1) * 32;
+	} else {
+		*urb_size = 0;
+	}
+}
+
+static int cpad_fb_oneframe(struct cpad_context *cpad)
+{
+	int res;
+	int urb_size;
+	int firstline;
+	int bpp = cpad->fb.info.var.bits_per_pixel;
+
+	if (cpad->fb.onlychanged) {
+		if (bpp == 1) {
+			cpad_fb_oneframe_1bpp_onlychanged(cpad, &firstline,
+								&urb_size);
+		} else {
+			cpad_fb_oneframe_24bpp_onlychanged(cpad, &firstline,
+								&urb_size);
+		}
+
+		res = cpad_fb_setcursor(cpad, firstline*30);
+		if (res)
+			return res;
+
+		memcpy(cpad->display.out.buffer, cpad->fb.buffer + firstline*32,
+								urb_size);
+	} else {
+		res = cpad_fb_setcursor(cpad, 0);
+		if (res)
+			return res;
+
+		if (bpp == 1) {
+			cpad_fb_oneframe_1bpp(cpad, &urb_size);
+		} else {
+			cpad_fb_oneframe_24bpp(cpad, &urb_size);
+		}
+	}
+
+	if (urb_size) {
+		return cpad_fb_sendurb(cpad, urb_size);
+	} else {
+		return 0;
+	}
+}
+
+static void cpad_fb_sendimage(void *arg)
+{
 	struct cpad_context *cpad = (struct cpad_context *) arg;
-	struct cpad_endpoint *out = &cpad->display.out;
-	unsigned char *tmpbuf = cpad->display.tmpbuf;
-	unsigned char *tmpbuf_pos;
-	unsigned char *tbuffer_pos = out->buffer;
-	unsigned char *vbuffer_pos = cpad->fb.videomemory;
-	size_t llength, vremaining, actual_length;
-	int res, i, j, grey, maxgrey, black, x, y;
 
 	if (!cpad->fb.active) {
-		complete(&cpad->fb.draw_finished);
+		complete(&cpad->fb.finished);
 		return;
 	}
 
 	if (down_trylock (&cpad->sem)) {
-		INIT_WORK (&cpad->fb.drawimage, cpad_fb_drawimage, cpad);
-		schedule_delayed_work (&cpad->fb.drawimage, HZ/60);
+		INIT_WORK (&cpad->fb.sendimage, cpad_fb_sendimage, cpad);
+		schedule_delayed_work (&cpad->fb.sendimage, HZ/60);
 		return;
 	}
 
 	if (atomic_read (&cpad->display.busy))
 		wait_for_completion (&cpad->display.finished);
 
-	*(tbuffer_pos++) = SEL_1335;
-	*(tbuffer_pos++) = CSRW_1335;
-	*(tbuffer_pos++) = 0;
-	*(tbuffer_pos++) = 0;
-	out->urb->transfer_buffer_length = 4;
-	res = usb_submit_urb(out->urb, GFP_KERNEL);
-	cpad->display.submit_res = res;
-	if (res) {
-		err("usb_submit_urb failed, error %d. deactivating framebuffer", res);
+	if (cpad_fb_oneframe(cpad)) {
 		cpad->fb.active = 0;
 		cpad->fb.rate = 0;
-		up (&cpad->sem);
-		return;
+	} else {
+		INIT_WORK (&cpad->fb.sendimage, cpad_fb_sendimage, cpad);
+		schedule_delayed_work (&cpad->fb.sendimage, HZ/cpad->fb.rate);
 	}
-	init_completion (&cpad->display.finished);
-	atomic_set (&cpad->display.busy, 1);
-	cpad_setup_timeout (cpad);
-	wait_for_completion (&cpad->display.finished);
-	res = cpad_check_display_urb_errors(cpad);
-	if (res) {
-		err("sending urb failed, error %d. deactivating framebuffer", res);
-		cpad->fb.active = 0;
-		cpad->fb.rate = 0;
-		up (&cpad->sem);
-		return;
-	}
-
-	tbuffer_pos = out->buffer;
-	actual_length = 0;
-	vremaining = 160*30;
-	maxgrey = 255*10;
-	black = 0;
-	y = 0;
-	while (vremaining > 0) {
-		llength = min (cpad->display.tmpbuf_size, vremaining);
-		if (actual_length+llength > out->buffer_size)
-			break;
-
-		/* convert line */
-		x = 0;
-		for (i=0; i<30; i++)
-			for (j=7; j>=0; j--) {
-				grey = 3*vbuffer_pos[0] + 6*vbuffer_pos[1] + vbuffer_pos[2];
-				grey = min((grey*cpad->fb.brightness)/100, maxgrey);
-
-				switch (cpad->fb.dither) {
-				case 0:
-					black = (2*grey > maxgrey) ? 0 : 1;
-					break;
-				case 1:
-					black = (5*grey > cpad_fb_dither2[x%2][y%2]*maxgrey) ? 0 : 1;
-					break;
-				case 2:
-					black = (17*grey > cpad_fb_dither4[x%4][y%4]*maxgrey) ? 0 : 1;
-					break;
-				case 3:
-					black = (65*grey > cpad_fb_dither8[x%8][y%8]*maxgrey) ? 0 : 1;
-				}
-
-				if (cpad->fb.invert)
-					black = !black;
-
-				if (black) {
-					tmpbuf[i] |= 1 << j;
-				}
-				else {
-					tmpbuf[i] &= ~(1 << j);
-				}
-				vbuffer_pos += 3;
-				x++;
-			}
-		vremaining -= llength;
-		y ++;
-
-		/* here we set the 1335 select, 1335 command, and reverse the params */
-		*(tbuffer_pos++) = SEL_1335;
-		*(tbuffer_pos++) = MWRITE_1335;
-		for (tmpbuf_pos=tmpbuf+llength-1; tmpbuf_pos>=tmpbuf; tmpbuf_pos--)
-			*(tbuffer_pos++) = *tmpbuf_pos;
-		actual_length += llength + 2;
-	}
-
-	/* this urb was already set up, except for this write size */
-	out->urb->transfer_buffer_length = actual_length;
-
-	res = usb_submit_urb(out->urb, GFP_KERNEL);
-	cpad->display.submit_res = res;
-	if (res) {
-		err("usb_submit_urb failed, error %d. deactivating framebuffer", res);
-		cpad->fb.active = 0;
-		cpad->fb.rate = 0;
-		up (&cpad->sem);
-		return;
-	}
-	init_completion (&cpad->display.finished);
-	atomic_set (&cpad->display.busy, 1);
-	cpad_setup_timeout (cpad);
-	wait_for_completion (&cpad->display.finished);
-	res = cpad_check_display_urb_errors(cpad);
-	if (res) {
-		err("sending urb failed, error %d. deactivating framebuffer", res);
-		cpad->fb.active = 0;
-		cpad->fb.rate = 0;
-		up (&cpad->sem);
-		return;
-	}
-
-	INIT_WORK (&cpad->fb.drawimage, cpad_fb_drawimage, cpad);
-	schedule_delayed_work (&cpad->fb.drawimage, HZ/cpad->fb.rate);
 
 	up (&cpad->sem);
 }
 
+static int cpad_fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
+					u_int transp, struct fb_info *info)
+{
+	if (regno >= 16)
+		return 1;
+
+	red   >>= 8;
+	green >>= 8;
+	blue  >>= 8;
+	((u32 *)(info->pseudo_palette))[regno] =
+		(red   << info->var.red.offset)   |
+		(green << info->var.green.offset) |
+		(blue  << info->var.blue.offset);
+	return 0;
+}
+
+int cpad_fb_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
+				unsigned long arg, struct fb_info *info)
+{
+	struct cpad_context *cpad = (struct cpad_context *)info->par;
+	unsigned char cval = 0;
+	int ival = 0;
+	int res = 0;
+
+	res = cpad_down (&cpad->sem, file);
+	if (res)
+		return res;
+
+	if (!cpad->present) {
+		res = -ENODEV;
+		goto error;
+	}
+
+	if (cmd & IOC_IN) {
+		switch (_IOC_SIZE(cmd)) {
+		case sizeof(char):
+			get_user(cval, (char *) arg);
+			break;
+		case sizeof(int):
+			get_user(ival, (int *) arg);
+			break;
+		default:
+			res = -ENOIOCTLCMD;
+			goto error;
+		}
+	}
+
+	switch (cmd) {
+	case CPAD_FRAMERATE:
+		if (cval <= 0)
+			cpad_fb_deactivate (cpad);
+		else
+			cpad_fb_activate (cpad, cval);
+		break;
+
+	case CPAD_DITHER:
+		cpad->fb.dither = min(max((int) cval, 0), 3);
+		break;
+
+	case CPAD_BRIGHTNESS:
+		cpad->fb.brightness = min(max(ival, 0), 10000);
+		break;
+
+	case CPAD_INVERT:
+		cpad->fb.invert = (cval <= 0) ? 0 : 1;
+		break;
+
+	case CPAD_ONLYCHANGED:
+		cpad->fb.onlychanged = (cval <= 0) ? 0 : 1;
+		break;
+
+	case CPAD_ONLYVISIBLE:
+		cpad->fb.onlyvisible = (cval <= 0) ? 0 : 1;
+		break;
+
+	case CPAD_ONEFRAME:
+		res = cpad_fb_oneframe(cpad);
+		break;
+
+	default:
+		res = -ENOIOCTLCMD;
+	}
+error:
+	up (&cpad->sem);
+	if (res < 0)
+		return res;
+
+	return 0;
+}
+
+int cpad_fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
+{
+	var->xres = 240;
+	var->yres = 160;
+	var->xres_virtual = 240;
+	var->yres_virtual = 160;
+      	var->activate = FB_ACTIVATE_NOW;
+      	var->height = 38;
+      	var->width = 46;
+      	var->vmode = FB_VMODE_NONINTERLACED;
+
+	if ((var->bits_per_pixel == 1) || (max_bpp == 1)) {
+		var->bits_per_pixel = 1;
+		var->red.offset = 0;
+		var->red.length = 1;
+		var->green.offset = 0;
+		var->green.length = 1;
+		var->blue.offset = 0;
+		var->blue.length = 1;
+	} else {
+		var->bits_per_pixel = 24;
+		var->red.offset = 0;
+		var->red.length = 8;
+		var->green.offset = 8;
+		var->green.length = 8;
+		var->blue.offset = 16;
+		var->blue.length = 8;
+	}
+	var->red.msb_right = 0;
+	var->green.msb_right = 0;
+	var->blue.msb_right = 0;
+	var->transp.offset = 0;
+	var->transp.length = 0;
+	var->transp.msb_right = 0;
+
+	return 0;
+}
+
+int cpad_fb_set_par(struct fb_info *info)
+{
+	if (info->var.bits_per_pixel == 1) {
+		info->fix.visual = FB_VISUAL_MONO01;
+		info->fix.line_length = 240/8;
+	} else {
+		info->fix.visual = FB_VISUAL_TRUECOLOR;
+		info->fix.line_length = 240*3;
+	}
+	return 0;
+}
+
 #else /* CONFIG_USB_CPADFB */
 
-static inline void cpad_fb_init(struct cpad_context *cpad) { }
-static inline void cpad_fb_remove(struct cpad_context *cpad) { }
+static int disable_fb = 1;
+static void cpad_fb_add(struct cpad_context *cpad) { }
+static void cpad_fb_remove(struct cpad_context *cpad) { }
+static void cpad_fb_free (struct cpad_context *cpad) { }
 static void cpad_fb_activate(struct cpad_context *cpad, int rate) { }
 static void cpad_fb_deactivate(struct cpad_context *cpad) { }
+static int cpad_fb_oneframe(struct cpad_context *cpad) { return 0; }
 
 #endif /* CONFIG_USB_CPADFB */

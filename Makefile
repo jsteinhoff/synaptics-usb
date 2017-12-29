@@ -9,7 +9,7 @@ all:
 .PHONY: clean
 
 clean:
-	$(RM) -f *.o *.ko *.mod.c .*.cmd
+	$(RM) -fr *.o *.ko *.mod.c .*.cmd .tmp_versions *~
 
 install:
-	install -m 644 -c cpad.ko $(INSTDIR)
+	install -m 644 cpad.ko $(INSTDIR)

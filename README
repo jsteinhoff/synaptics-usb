@@ -104,6 +104,9 @@ the program usr_cpad is the best choice. It is included in the tarball of the
 kernel 2.4 driver, available at:
 	http://www.janerob.com/rob/ts5100/cPad/index.shtml
 There is also a gallery with examples, scripts ...
+I have written the tool cpadconsole, which can help developing programs for
+the character device. Get it at:
+	http://www.uni-jena.de/~p1stja/linux/cpadconsole.html
 
 
 Using the procfs interface
@@ -128,17 +131,29 @@ Frame buffer brightness (default is 200):
 Invert black and white:
 	echo "invert:1" > /proc/driver/cpad/0
 
+Send only changed image lines:
+	echo "onlychanged:1" /proc/driver/cpad/0
+
+Update only visible part of cPad memory (has no effect in 24 bpp mode):
+	echo "onlyvisible:1" /proc/driver/cpad/0
+
+Draw only one frame:
+	echo "oneframe" /proc/driver/cpad/0
+
 
 Using the frame buffer device
 ----------------------------
-Until now, the frame buffer doesn't work in FB_VISUAL_MONO01 mode, because most
-applications don't like this. That's why the frame buffer emulates 24bpp and then
-converts it to black/white using dithering. The famebuffer is disabled by
-default. You can enable it with
+The famebuffer is disabled by default. You can enable it with
 	echo "framerate:30" > /proc/driver/cpad/0
 The following examples assume that your primary display is /dev/fb0, so your 
 touchpad is the second frame buffer device /dev/fb1. If you don't use vesafb or
 any other frame buffer, then your cPad will be /dev/fb0.
+
+Emulate 24 bpp:
+	Most applications do not like frame buffers with 1 bpp. The cPad frame
+	buffer can emulate 24 bpp. You can switch to 24 bpp with fbset:
+		fbset -fb /dev/fb1 -depth 24
+	All examples below need 24 bpp.
 
 Playing movies:
 	mplayer -vo fbdev -fb /dev/fb1 -vf scale=240:160 <file>
@@ -148,8 +163,6 @@ Running XFree86:
 	XF86Config file:
 		Driver		"fbdev"
 		Option		"fbdev"	"/dev/fb1"
-	Whould be nice if someone could write a driver for XFree86 to make the
-	touchpad act as a touchscreen.
 
 Map a tty to the frame buffer:
 	Some programs need a tty on the frame buffer to run correctly. You need
@@ -159,14 +172,47 @@ Map a tty to the frame buffer:
 	ftp://ftp.debian.org/debian/pool/main/f/fbgetty/
 	Example: Do "fbgetty /dev/tty9 /dev/fb1", then press <ALT>+<F9> and you
 	should be able to login. It looks better if you invert the screen with:
-	echo "invert:1" > /proc/driver/cpad/0
+		echo "invert:1" > /proc/driver/cpad/0
 
 Other Software for frame buffer devices:
 	http://linux-fbdev.sourceforge.net
 
 
+Module parameters
+-----------------
+Disable input devices:
+	modprobe cpad disable_input=1
+Disable character device:
+	modprobe cpad disable_cdev=1
+Disable procfs interface:
+	modprobe cpad disable_procfs=1
+Disable frame buffer:
+	modprobe cpad disable_fb=1
+Set maximum bpp to 1 (saves 108k memory):
+	modprobe cpad max_bpp=1
+
+
+Bugs
+----
+- urb sometimes times out. With kernel 2.6.3 this happens always after
+  reloading the module. This is very seldom with kernel >= 2.6.6. Have not
+  tested 2.6.4 and 2.6.5.
+- With kernel >= 2.6.7 rmmod hangs while the evdev device of the cPad 
+  (/dev/input/event?) is in use. usbhid.ko seems to have the same problem.
+  If you are using Synaptics TouchPad driver for XFree86 and do rmmod from
+  xterm, it will hang. Switching to console and then back to X helps.
+
+
 Changes
 -------
+version 0.3:
+	replaced interruptible_sleep_on with wait_event_interruptible
+	removed some inline's
+	show more information in procfs
+	add support for 1 bpp to frame buffer
+	add ioctl's to frame buffer
+	add oneframe, onlychanged and onlyvisible options to frame buffer
+
 version 0.2:
 	fixed a color to mono conversion bug
 	added a pseudo_palette (needed by virtual terminals)
