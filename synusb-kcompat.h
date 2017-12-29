@@ -4,6 +4,21 @@
 #include <asm/byteorder.h>
 #include <linux/types.h>
 #include <asm/atomic.h>
+#include <linux/workqueue.h>
+
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
+
+struct delayed_work {
+	struct work_struct work;
+};
+
+#define INIT_DELAYED_WORK(_work, _func)	INIT_WORK(&(_work)->work, (_func), &(_work)->work)
+
+#define schedule_delayed_work(_work, _delay) schedule_delayed_work(&(_work)->work, (_delay))
+#define cancel_delayed_work(_work) cancel_delayed_work(&(_work)->work)
+
+#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20) */
 
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)

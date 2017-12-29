@@ -21,6 +21,16 @@
  * Trademarks are the property of their respective owners.
  */
 
+/* TODO:
+ * adopt changes from usb_skeleton.c v2.0 -> v2.2:
+ *	replace struct semaphore by struct mutex
+ *	use synusb.interface instead of synusb.gone (save memory)
+ *	autosuspend code
+ * replace synusb.wait and synusb.done by struct completion
+ * need more suspend code?
+ * check usbmouse.c for changes
+ * check coding style and comments
+ */
 
 #include "synusb-kcompat.h"
 
@@ -43,6 +53,7 @@
 #include <linux/kref.h>
 #endif
 #include <linux/input.h>
+#include <linux/workqueue.h>
 #include <linux/moduleparam.h>
 #include <linux/cpad.h>
 
@@ -72,7 +83,7 @@ static struct usb_device_id synusb_idtable [] = {
 MODULE_DEVICE_TABLE (usb, synusb_idtable);
 
 
-struct synusb_context {
+struct synusb {
 	struct usb_device *	udev;
 	struct usb_interface *	interface;
 	struct kref		kref;
@@ -86,16 +97,15 @@ struct synusb_context {
 	wait_queue_head_t	wait;
 	int			done;
 	int			error;
-	struct work_struct	flash;
+	struct delayed_work	flash;
 #endif /* CONFIG_USB_CPADDEV */
 
 	/* input device */
 	struct input_dev	*idev;
 	char			iphys[64];
-	struct work_struct	isubmit;
+	struct delayed_work	isubmit;
 	struct urb *		iurb;
 };
-#define to_synusb_dev(d) container_of(d, struct synusb_context, kref)
 
 static struct usb_driver synusb_driver;
 
@@ -110,7 +120,7 @@ static inline void synusb_free_urb(struct urb *urb)
 
 static void synusb_delete(struct kref *kref)
 {
-	struct synusb_context *synusb = to_synusb_dev(kref);
+	struct synusb *synusb = container_of(kref, struct synusb, kref);
 
 	synusb_free_urb(synusb->iurb);
 	if (synusb->idev)
@@ -156,7 +166,7 @@ static void synusb_input_callback(struct urb *urb)
 static void synusb_input_callback(struct urb *urb, struct pt_regs *regs)
 #endif
 {
-	struct synusb_context *synusb = (struct synusb_context *)urb->context;
+	struct synusb *synusb = (struct synusb *)urb->context;
 	unsigned char *data = urb->transfer_buffer;
 	struct input_dev *idev = synusb->idev;
 	int res, w, pressure, num_fingers, tool_width;
@@ -226,9 +236,13 @@ resubmit:
 /* data must always be fetched from the int endpoint, otherwise the touchpad
  * would reconnect to force driver reload, so this is always scheduled by probe
  */
-static void synusb_submit_int(void *arg)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
+static void synusb_submit_int(void *work)
+#else
+static void synusb_submit_int(struct work_struct *work)
+#endif
 {
-	struct synusb_context *synusb = (struct synusb_context *)arg;
+	struct synusb *synusb = container_of(work, struct synusb, isubmit.work);
 	int res;
 
 	res = usb_submit_urb (synusb->iurb, GFP_KERNEL);
@@ -236,7 +250,7 @@ static void synusb_submit_int(void *arg)
 		err ("usb_submit_urb int in failed with result %d", res);
 }
 
-static int synusb_init_input(struct synusb_context *synusb)
+static int synusb_init_input(struct synusb *synusb)
 {
 	struct input_dev *idev;
 	struct usb_device *udev = synusb->udev;
@@ -280,7 +294,7 @@ static int synusb_init_input(struct synusb_context *synusb)
 
 	input_register_device(idev);
 
-	INIT_WORK (&synusb->isubmit, synusb_submit_int, synusb);
+	INIT_DELAYED_WORK (&synusb->isubmit, synusb_submit_int);
 	schedule_delayed_work (&synusb->isubmit, HZ/100);
 
 	return 0;
@@ -343,7 +357,7 @@ static int synusb_init_input(struct synusb_context *synusb)
 
 static int cpad_open(struct inode *inode, struct file *file)
 {
-	struct synusb_context *synusb;
+	struct synusb *synusb;
 	struct usb_interface *interface;
 	int subminor;
 
@@ -368,9 +382,9 @@ static int cpad_open(struct inode *inode, struct file *file)
 
 static int cpad_release(struct inode *inode, struct file *file)
 {
-	struct synusb_context *synusb;
+	struct synusb *synusb;
 
-	synusb = (struct synusb_context *)file->private_data;
+	synusb = (struct synusb *)file->private_data;
 	if (synusb == NULL)
 		return -ENODEV;
 
@@ -378,7 +392,7 @@ static int cpad_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static inline int cpad_down(struct synusb_context* synusb, struct file *file)
+static inline int cpad_down(struct synusb* synusb, struct file *file)
 {
 	if (down_trylock(&synusb->sem)) {
 		if (file->f_flags & O_NONBLOCK)
@@ -395,10 +409,10 @@ static inline int cpad_down(struct synusb_context* synusb, struct file *file)
 static ssize_t cpad_read(struct file *file, char *buffer,
 			 size_t count, loff_t *ppos)
 {
-	struct synusb_context *synusb;
+	struct synusb *synusb;
 	int retval;
 
-	synusb = (struct synusb_context *)file->private_data;
+	synusb = (struct synusb *)file->private_data;
 
 	retval = cpad_down(synusb, file);
 	if (retval)
@@ -425,9 +439,9 @@ static void cpad_in_callback(struct urb *urb)
 static void cpad_in_callback(struct urb *urb, struct pt_regs *regs)
 #endif
 {
-	struct synusb_context *synusb;
+	struct synusb *synusb;
 
-	synusb = (struct synusb_context *)urb->context;
+	synusb = (struct synusb *)urb->context;
 
 	synusb->done = 1;
 	wake_up_interruptible(&synusb->wait);
@@ -439,9 +453,9 @@ static void cpad_out_callback(struct urb *urb)
 static void cpad_out_callback(struct urb *urb, struct pt_regs *regs)
 #endif
 {
-	struct synusb_context *synusb;
+	struct synusb *synusb;
 
-	synusb = (struct synusb_context *)urb->context;
+	synusb = (struct synusb *)urb->context;
 
 	if (urb->status)
 		goto error;
@@ -459,7 +473,7 @@ error:
 }
 
 /* send out and in urbs synchronously */
-static int cpad_submit_bulk(struct synusb_context* synusb)
+static int cpad_submit_bulk(struct synusb* synusb)
 {
 	int retval;
 
@@ -506,7 +520,7 @@ static inline unsigned char *cpad_1335_fillpacket
 	return out_buf;
 }
 
-static int cpad_write_fillbuffer(struct synusb_context *synusb,
+static int cpad_write_fillbuffer(struct synusb *synusb,
 				 const unsigned char *ubuffer, size_t count)
 {
 	unsigned char *out_buf = synusb->out->transfer_buffer;
@@ -555,10 +569,10 @@ static int cpad_write_fillbuffer(struct synusb_context *synusb,
 static ssize_t cpad_write(struct file *file, const char *user_buffer,
 			  size_t count, loff_t *ppos)
 {
-	struct synusb_context *synusb;
+	struct synusb *synusb;
 	int length, retval;
 
-	synusb = (struct synusb_context *)file->private_data;
+	synusb = (struct synusb *)file->private_data;
 
 	if (count == 0)
 		return 0;
@@ -582,7 +596,7 @@ error:
 	return retval;
 }
 
-static int cpad_nlcd_function(struct synusb_context *synusb, unsigned char func,
+static int cpad_nlcd_function(struct synusb *synusb, unsigned char func,
 			      unsigned char val)
 {
 	unsigned char *out_buf = synusb->out->transfer_buffer;
@@ -606,11 +620,13 @@ static int cpad_nlcd_function(struct synusb_context *synusb, unsigned char func,
 	return retval;
 }
 
-static void cpad_light_off(void *arg)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
+static void cpad_light_off(void *work)
+#else
+static void cpad_light_off(struct work_struct *work)
+#endif
 {
-	struct synusb_context *synusb;
-
-	synusb = (struct synusb_context *)arg;
+	struct synusb *synusb = container_of(work, struct synusb, flash.work);
 
 	down (&synusb->sem);
 	if (cpad_nlcd_function(synusb, CPAD_W_LIGHT, 0) < 0)
@@ -618,9 +634,9 @@ static void cpad_light_off(void *arg)
 	up (&synusb->sem);
 }
 
-static int cpad_flash(struct synusb_context *synusb, int time)
+static int cpad_flash(struct synusb *synusb, int time)
 {
-	struct work_struct *flash = &synusb->flash;
+	struct delayed_work *flash = &synusb->flash;
 	int res;
 
 	if (time <= 0)
@@ -639,13 +655,13 @@ int cpad_driver_num = CPAD_DRIVER_NUM;
 static int cpad_ioctl(struct inode *inode, struct file  *file,
 		      unsigned int  cmd, unsigned long arg)
 {
-	struct synusb_context *synusb;
+	struct synusb *synusb;
 	unsigned char cval = 0;
 	int ival = 0;
 	void *rval = NULL;
 	int res = 0;
 
-	synusb = (struct synusb_context *)file->private_data;
+	synusb = (struct synusb *)file->private_data;
 
 	res = cpad_down(synusb, file);
 	if (res)
@@ -741,7 +757,7 @@ static struct usb_class_driver cpad_class = {
 	.minor_base =	USB_CPAD_MINOR_BASE,
 };
 
-static int cpad_init_bulk(struct synusb_context *synusb, struct urb **urb,
+static int cpad_init_bulk(struct synusb *synusb, struct urb **urb,
 			  size_t size, usb_complete_t bulk_callback, int pipe)
 {
 	char *buf;
@@ -759,7 +775,7 @@ static int cpad_init_bulk(struct synusb_context *synusb, struct urb **urb,
 	return 0;
 }
 
-static int cpad_setup_in(struct synusb_context *synusb,
+static int cpad_setup_in(struct synusb *synusb,
 			 struct usb_endpoint_descriptor *endpoint)
 {
 	if ((synusb->in) || (endpoint->wMaxPacketSize != 32))
@@ -770,7 +786,7 @@ static int cpad_setup_in(struct synusb_context *synusb,
 					      endpoint->bEndpointAddress));
 }
 
-static int cpad_setup_out(struct synusb_context *synusb,
+static int cpad_setup_out(struct synusb *synusb,
 			  struct usb_endpoint_descriptor *endpoint)
 {
 	if ((synusb->out) || (endpoint->wMaxPacketSize != 32))
@@ -788,7 +804,7 @@ static int cpad_setup_out(struct synusb_context *synusb,
  * init etc.
  */
 
-static int synusb_setup_iurb(struct synusb_context *synusb,
+static int synusb_setup_iurb(struct synusb *synusb,
 			     struct usb_endpoint_descriptor *endpoint)
 {
 	char *buf;
@@ -798,7 +814,7 @@ static int synusb_setup_iurb(struct synusb_context *synusb,
 	synusb->iurb = usb_alloc_urb(0, GFP_KERNEL);
 	if (!synusb->iurb)
 		return -ENOMEM;
-	buf = usb_buffer_alloc(synusb->udev, 8, SLAB_ATOMIC,
+	buf = usb_buffer_alloc(synusb->udev, 8, GFP_ATOMIC,
 			       &synusb->iurb->transfer_dma);
 	if (!buf)
 		return -ENOMEM;
@@ -814,7 +830,7 @@ static int synusb_setup_iurb(struct synusb_context *synusb,
 static struct synusb_endpoint_table {
 	__u8 dir;
 	__u8 xfer_type;
-	int  (*setup)(struct synusb_context *,
+	int  (*setup)(struct synusb *,
 		      struct usb_endpoint_descriptor *);
 } synusb_endpoints [] = {
 #ifdef CONFIG_USB_CPADDEV
@@ -838,7 +854,7 @@ static inline int synusb_match_endpoint(struct usb_endpoint_descriptor *ep)
 	return -1;
 }
 
-static int synusb_setup_endpoints(struct synusb_context *synusb)
+static int synusb_setup_endpoints(struct synusb *synusb)
 {
 	struct usb_host_interface *iface_desc;
 	struct usb_endpoint_descriptor *endpoint;
@@ -876,7 +892,7 @@ static int synusb_setup_endpoints(struct synusb_context *synusb)
 static int synusb_probe(struct usb_interface *interface,
 			const struct usb_device_id *id)
 {
-	struct synusb_context *synusb = NULL;
+	struct synusb *synusb = NULL;
 	struct usb_device *udev = interface_to_usbdev(interface);
 	int ifnum, retval = -ENOMEM;
 	int is_cpad;
@@ -923,7 +939,7 @@ static int synusb_probe(struct usb_interface *interface,
 	printk(KERN_INFO "cpad registered on minor: %d\n", interface->minor);
 
 	init_waitqueue_head(&synusb->wait);
-	INIT_WORK(&synusb->flash, cpad_light_off, synusb);
+	INIT_DELAYED_WORK(&synusb->flash, cpad_light_off);
 	init_MUTEX(&synusb->sem);
 #endif /* CONFIG_USB_CPADDEV */
 	return 0;
@@ -936,7 +952,7 @@ error:
 
 static void synusb_disconnect(struct usb_interface *interface)
 {
-	struct synusb_context *synusb;
+	struct synusb *synusb;
 
 	lock_kernel();
 
@@ -978,7 +994,7 @@ static struct usb_driver synusb_driver = {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
 	.owner =	THIS_MODULE,
 #endif
-	.name =	"synaptics-usb",
+	.name =		"synaptics-usb",
 	.probe =	synusb_probe,
 	.disconnect =	synusb_disconnect,
 	.id_table =	synusb_idtable,

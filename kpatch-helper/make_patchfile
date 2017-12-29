@@ -40,7 +40,7 @@ mkdir include/linux
 cp ../../../synaptics-usb.c drivers/usb/input
 cp ../../../cpad.h include/linux
 #echo Press return to continue...; read
-if [ $VCODE -le 132626 ] ; then
+if [ $VCODE -le 132627 ] ; then
 	cp ../../../synusb-kcompat.h drivers/usb/input
 else
 	patch -p1 --no-backup-if-mismatch -i ../../cleanup.patch || leave 1

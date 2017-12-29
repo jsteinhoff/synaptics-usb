@@ -1,5 +1,5 @@
 KVERSION	:= `uname -r`
-DVERSION	:= 1.4rc8
+DVERSION	:= 1.4rc9
 KSRC		:= /lib/modules/$(KVERSION)/build
 MODINSTDIR	:= /lib/modules/$(KVERSION)/kernel/drivers/usb/input
 INSTDIR		:= /usr/local/sbin
