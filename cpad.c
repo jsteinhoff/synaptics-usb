@@ -1,5 +1,5 @@
 /****
- * USB Synaptics cPad driver
+ * USB Synaptics Touchpad/cPad driver
  *
  *  Copyright (c) 2002 Rob Miller (rob@inpharmatica . co . uk)
  *  Copyright (c) 2003 Ron Lee (ron@debian.org)
@@ -28,7 +28,8 @@
  *	setting 1: one int endpoint for abs finger position
  *	setting 2: one int endpoint for abs finger position and
  *		   two bulk endpoints for the display (in/out)
- * this driver uses setting 2
+ * The Synaptics Touchpads without display only have settings 0 and 1, so
+ * this driver uses setting 2 for the cPad and setting 1 for other Touchpads.
  *
  * How the bulk endpoints work:
  *
@@ -62,8 +63,8 @@
 #define SEL_CPAD	0x01	/* cPad not-lcd-controller select */
 #define SEL_1335	0x02	/* lcd controller select */
 
-/* an urb to the bulk out endpoint must be followed by an urb to the bulk in
- * endpoint. this gives the answer of the cpad/sed1335. */
+/* an urb to the bulk out endpoint should be followed by an urb to the bulk
+ * in endpoint. this gives the answer of the cpad/sed1335. */
 
 
 #include <linux/config.h>
@@ -91,7 +92,7 @@
 #define info(format, arg...) printk(KERN_INFO "cpad: " format "\n", ## arg)
 #define warn(format, arg...) printk(KERN_WARNING "cpad: " format "\n", ## arg)
 
-#define DRIVER_VERSION "v1.1"
+#define DRIVER_VERSION "v1.2"
 #define DRIVER_AUTHOR	"Rob Miller (rob@inpharmatica . co . uk), "\
 			"Ron Lee (ron@debian.org), "\
 			"Jan Steinhoff <jan.steinhoff@uni-jena.de>"
@@ -101,10 +102,12 @@
 #define CPAD_DRIVER_NUM 	8
 
 #define USB_VENDOR_ID_SYNAPTICS 0x06cb
+#define USB_DEVICE_ID_SYN_USB   0x0002
 #define USB_DEVICE_ID_CPAD      0x0003
 
 static struct usb_device_id cpad_idtable [] = {
 	{ USB_DEVICE(USB_VENDOR_ID_SYNAPTICS, USB_DEVICE_ID_CPAD) },
+	{ USB_DEVICE(USB_VENDOR_ID_SYNAPTICS, USB_DEVICE_ID_SYN_USB) },
 	{ }
 };
 MODULE_DEVICE_TABLE (usb, cpad_idtable);
@@ -116,6 +119,7 @@ struct cpad_context {
 	struct kref		kref;
 
 	/* character device */
+	int			no_display;
 	struct semaphore	sem;
 	int			gone;
 	struct urb		*in, *out;
@@ -798,8 +802,13 @@ static int cpad_setup_endpoints(struct cpad_context *cpad)
 		}
 	}
 
-	if (num != 3)
-		return -ENODEV;
+	if (cpad->no_display) {
+		if (num != 1)
+			return -ENODEV;
+	} else {
+		if (num != 3)
+			return -ENODEV;
+	}
 
 	return 0;
 }
@@ -809,10 +818,12 @@ static int cpad_probe(struct usb_interface *interface,
 {
 	struct cpad_context *cpad = NULL;
 	struct usb_device *udev = interface_to_usbdev(interface);
-	int ifnum, retval = -ENOMEM;
+	int ifnum, no_display, retval = -ENOMEM;
+
+	no_display = (id->idProduct == USB_DEVICE_ID_CPAD) ? 0 : 1;
 
 	ifnum = interface->cur_altsetting->desc.bInterfaceNumber;
-	if (usb_set_interface (udev, ifnum, 2))
+	if (usb_set_interface (udev, ifnum, no_display ? 1 : 2))
 		return -ENODEV;
 
 	cpad = kmalloc(sizeof(*cpad), GFP_KERNEL);
@@ -821,6 +832,7 @@ static int cpad_probe(struct usb_interface *interface,
 		goto error;
 	}
 	memset(cpad, 0x00, sizeof(*cpad));
+	cpad->no_display = no_display;
 	kref_init(&cpad->kref);
 
 	cpad->udev = usb_get_dev(udev);
@@ -831,6 +843,10 @@ static int cpad_probe(struct usb_interface *interface,
 		goto error;
 	}
 	usb_set_intfdata(interface, cpad);
+	cpad_init_input(cpad);
+
+	if (no_display)
+		return 0;
 
 	retval = usb_register_dev(interface, &cpad_class);
 	if (retval) {
@@ -843,7 +859,6 @@ static int cpad_probe(struct usb_interface *interface,
 	init_waitqueue_head(&cpad->wait);
 	INIT_WORK(&cpad->flash, cpad_light_off, cpad);
 	init_MUTEX(&cpad->sem);
-	cpad_init_input(cpad);
 	return 0;
 
 error:
@@ -861,16 +876,21 @@ static void cpad_disconnect(struct usb_interface *interface)
 	cpad = usb_get_intfdata(interface);
 	usb_set_intfdata(interface, NULL);
 
-	usb_deregister_dev(interface, &cpad_class);
+	if (cpad->no_display) {
+		unlock_kernel();
+	} else {
+		usb_deregister_dev(interface, &cpad_class);
 
-	unlock_kernel();
+		unlock_kernel();
 
-	/* make sure no more work is scheduled */
-	down(&cpad->sem);
-	cpad->gone = 1;
-	up(&cpad->sem);
-	/* cancel the rest */
-	cancel_delayed_work(&cpad->flash);
+		/* make sure no more work is scheduled */
+		down(&cpad->sem);
+		cpad->gone = 1;
+		up(&cpad->sem);
+		/* cancel the rest */
+		cancel_delayed_work(&cpad->flash);
+	}
+
 	cancel_delayed_work(&cpad->isubmit);
 	flush_scheduled_work();
 
@@ -891,14 +911,12 @@ static struct usb_driver cpad_driver = {
 };
 
 static int steal = 1;
-static int cpad_registered = 0;
 
 static void repossess_devices( struct usb_driver *driver, struct usb_device_id *id )
 {
-	if (!steal || !cpad_registered)
+	if (!steal)
 		return;
 
-	steal = 0;
 	while( id->idVendor )
 	{
 		// XXX Not enough, we need to find ALL devices, not just the
@@ -916,11 +934,6 @@ static void repossess_devices( struct usb_driver *driver, struct usb_device_id *
 
 			if ( interface->dev.driver != &driver->driver )
 			{
-			    info( "current = '%s' - '%s' -- this = '%s'",
-				    udev->dev.driver->name,
-				    interface->dev.driver->name,
-				    driver->driver.name);
-
 			    if (usb_interface_claimed(interface))
 			    {
 				    info("releasing '%s' from generic driver '%s'.",
@@ -929,7 +942,7 @@ static void repossess_devices( struct usb_driver *driver, struct usb_device_id *
 				    device_release_driver(&interface->dev);
 			    }
 
-			    driver_probe_device(&driver->driver,&interface->dev);
+			    driver_attach(&driver->driver);
 			}
 			else
 			    info( "already attached" );
@@ -943,16 +956,20 @@ static void repossess_devices( struct usb_driver *driver, struct usb_device_id *
 	}
 }
 
-static int cpad_set_steal(const char *val, struct kernel_param *kp)
+static int rebind_in;
+
+static int cpad_set_rebind(const char *val, struct kernel_param *kp)
 {
 	int retval;
 
 	retval = param_set_int(val, kp);
+        info("user rebind request %d", rebind_in);
 	repossess_devices( &cpad_driver, cpad_idtable );
 	return retval;
 }
 
-module_param_call(steal, cpad_set_steal, param_get_int, &steal, 0664);
+module_param_call(rebind, cpad_set_rebind, param_get_int, &rebind_in, 0664);
+module_param_call(steal, cpad_set_rebind, param_get_int, &steal, 0664);
 
 static int __init cpad_init(void)
 {
@@ -963,7 +980,6 @@ static int __init cpad_init(void)
 		err("usb_register failed. Error number %d", result);
 	else {
 		info(DRIVER_DESC " " DRIVER_VERSION);
-		cpad_registered = 1;
 		repossess_devices( &cpad_driver, cpad_idtable );
 	}
 
