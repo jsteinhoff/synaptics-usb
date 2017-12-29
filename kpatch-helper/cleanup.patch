@@ -1,16 +1,19 @@
 diff -ruN linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.18-synusb-cleanup/drivers/usb/input/synaptics-usb.c
---- linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c	2006-10-06 19:25:02.000000000 +0200
-+++ linux-2.6.18-synusb-cleanup/drivers/usb/input/synaptics-usb.c	2006-10-06 19:29:24.000000000 +0200
-@@ -22,8 +22,6 @@
+--- linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c	2006-10-08 14:14:27.000000000 +0200
++++ linux-2.6.18-synusb-cleanup/drivers/usb/input/synaptics-usb.c	2006-10-08 14:16:10.000000000 +0200
+@@ -22,11 +22,6 @@
   */
  
  
 -#include "synusb-kcompat.h"
 -
- #include <linux/config.h>
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,15)
+-#include <linux/config.h>
+-#endif
  #include <linux/kernel.h>
  #include <linux/errno.h>
-@@ -32,14 +30,8 @@
+ #include <linux/init.h>
+@@ -34,14 +29,8 @@
  #include <linux/module.h>
  #include <asm/uaccess.h>
  #include <linux/usb.h>
@@ -25,7 +28,7 @@ diff -ruN linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.18-syn
  #include <linux/input.h>
  #include <linux/moduleparam.h>
  #include <linux/cpad.h>
-@@ -264,11 +256,7 @@
+@@ -266,11 +255,7 @@
  	idev->phys = synusb->iphys;
  	idev->name = synusb_input_name;
  	usb_to_input_id(udev, &idev->id);
@@ -37,7 +40,7 @@ diff -ruN linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.18-syn
  
  	input_register_device(idev);
  
-@@ -715,9 +703,6 @@
+@@ -717,9 +702,6 @@
  static struct usb_class_driver cpad_class = {
  	.name =		"usb/cpad%d",
  	.fops =		&cpad_fops,
@@ -47,13 +50,13 @@ diff -ruN linux-2.6.18-synusb/drivers/usb/input/synaptics-usb.c linux-2.6.18-syn
  	.minor_base =	USB_CPAD_MINOR_BASE,
  };
  
-@@ -955,9 +940,6 @@
+@@ -957,9 +939,6 @@
  }
  
  static struct usb_driver synusb_driver = {
 -#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
 -	.owner =	THIS_MODULE,
 -#endif
- 	.name =		"synaptics-usb",
+ 	.name =	"synaptics-usb",
  	.probe =	synusb_probe,
  	.disconnect =	synusb_disconnect,

@@ -24,7 +24,9 @@
 
 #include "synusb-kcompat.h"
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,15)
 #include <linux/config.h>
+#endif
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -958,7 +960,7 @@ static struct usb_driver synusb_driver = {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
 	.owner =	THIS_MODULE,
 #endif
-	.name =		"synaptics-usb",
+	.name =	"synaptics-usb",
 	.probe =	synusb_probe,
 	.disconnect =	synusb_disconnect,
 	.id_table =	synusb_idtable,
