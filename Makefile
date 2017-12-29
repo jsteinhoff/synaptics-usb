@@ -1,7 +1,7 @@
-KVERSION 	:= `uname -r`
+KVERSION	:= `uname -r`
 INSTDIR		:= /lib/modules/$(KVERSION)/kernel/drivers/usb/input
 
-obj-m 		:= cpad.o
+obj-m		:= cpad.o
 
 all:
 	$(MAKE) modules -C /lib/modules/$(KVERSION)/build SUBDIRS=`pwd`
