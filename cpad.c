@@ -60,21 +60,6 @@
 /* an urb to the bulk out endpoint must be followed by an urb to the bulk in
  * endpoint. this gives the answer of the cpad/sed1335. */
 
-/****
- * BUGS
- *
- * - Sometimes the urb for the bulk in endpoint times out. With kernel 2.6.3
- *   this happens every time the module is reloaded; very seldom with kernel
- *   >= 2.6.6; not tested 2.6.4 and 2.6.5. I think the following happens:
- *   The urb to the bulk out endpoint is reported to succeed in
- *   cpad_display_out_callback, but there is no change on the display, so in
- *   fact the urb got lost somehow. Reading the answer of the cPad from the
- *   bulk in endpoint therefore times out.
- * - With kernel >= 2.6.7 rmmod hangs while the evdev device of the cPad
- *   (/dev/input/event?) is in use. usbhid.ko seems to have the same problem.
- *   usb_deregister hangs, although cpad_disconnect returned.
- */
-
 
 #include <linux/usb.h>
 #include <linux/input.h>
@@ -87,7 +72,7 @@
 #include "cpadconfig.h"
 #include "cpad.h"
 
-#define DRIVER_VERSION "v0.3"
+#define DRIVER_VERSION "v0.4"
 #define DRIVER_AUTHOR	"Rob Miller (rob@inpharmatica . co . uk), "\
 			"Ron Lee (ron@debian.org), "\
 			"Jan Steinhoff <jan.steinhoff@uni-jena.de>"
@@ -199,6 +184,7 @@ static void cpad_display_in_callback (struct urb *urb, struct pt_regs *regs);
 static void cpad_free_context(struct cpad_context *cpad);
 static int cpad_setup_endpoints(struct cpad_context *cpad);
 
+static void cpad_timeout_kill(unsigned long data);
 static void cpad_light_off(void *arg);
 
 /* input */
@@ -311,6 +297,11 @@ static int cpad_probe(struct usb_interface *interface,
 	init_MUTEX (&cpad->open_count_sem);
 	init_waitqueue_head (&cpad->display.queue);
 	INIT_WORK (&cpad->display.flash, cpad_light_off, cpad);
+
+	init_timer(&cpad->display.timer);
+	cpad->display.timer.data = (unsigned long)cpad;
+	cpad->display.timer.function = cpad_timeout_kill;
+
 	cpad->udev = udev;
 	cpad->interface = interface;
 
@@ -390,6 +381,8 @@ static void cpad_disconnect(struct usb_interface *interface)
 	flush_scheduled_work ();
 	down (&cpad->sem);
 
+	del_timer_sync(&cpad->display.timer);
+
 	/* unlink urbs */
 	usb_unlink_urb(cpad->touchpad.in.urb);
 	if (atomic_read (&cpad->display.busy)) {
@@ -423,7 +416,7 @@ static void cpad_display_out_callback (struct urb *urb, struct pt_regs *regs)
 			return;
 		err ("usb_submit_urb bulk in failed with result %d", res);
 	}
-	del_timer_sync (&cpad->display.timer);
+	del_timer (&cpad->display.timer);
 	atomic_set (&cpad->display.busy, 0);
 	complete (&cpad->display.finished);
 	wake_up_interruptible (&cpad->display.queue);
@@ -433,10 +426,20 @@ static void cpad_display_in_callback (struct urb *urb, struct pt_regs *regs)
 {
 	struct cpad_context *cpad = (struct cpad_context *)urb->context;
 
-	del_timer_sync (&cpad->display.timer);
+	del_timer (&cpad->display.timer);
 	atomic_set (&cpad->display.busy, 0);
 	complete (&cpad->display.finished);
 	wake_up_interruptible (&cpad->display.queue);
+}
+
+static void cpad_timeout_kill(unsigned long data)
+{
+	struct cpad_context *cpad = (struct cpad_context *) data;
+
+	cpad->display.timed_out = 1;
+	usb_unlink_urb (cpad->display.out.urb);
+	usb_unlink_urb (cpad->display.in.urb);
+	err("cpad display urb timed out");
 }
 
 /*
@@ -495,7 +498,7 @@ static int cpad_setup_bulk_endpoint(struct cpad_endpoint *bulk,
 	bulk->buffer = usb_buffer_alloc (cpad->udev, buffer_size, GFP_KERNEL,
 					&bulk->urb->transfer_dma);
 	if (!bulk->buffer) {
-		err("Couldn't allocate bulk buffer");
+		err("Could not allocate bulk buffer");
 		return -ENOMEM;
 	}
 	usb_fill_bulk_urb (bulk->urb, cpad->udev, pipe, bulk->buffer,
@@ -520,7 +523,7 @@ static int cpad_setup_int_endpoint(struct cpad_endpoint *tp,
 	tp->buffer = usb_buffer_alloc (cpad->udev, 8, SLAB_ATOMIC,
 				       &tp->urb->transfer_dma);
 	if (!cpad->touchpad.in.buffer) {
-		err("Couldn't allocate irq_in_buffer");
+		err("Could not allocate irq_in_buffer");
 		return -ENOMEM;
 	}
 	usb_fill_int_urb (tp->urb, cpad->udev, pipe, tp->buffer, buffer_size,
@@ -588,6 +591,8 @@ static int cpad_setup_endpoints(struct cpad_context *cpad)
 
 /*
  * general helper functions
+ *
+ * call cpad_down before using any of these
  */
 
 /* call with structure locked and after both display urbs finished */
@@ -609,7 +614,8 @@ static int cpad_wait_interruptible(struct cpad_context *cpad)
 	int res;
 
 	while (atomic_read (busy)) {
-		res = wait_event_interruptible_timeout(cpad->display.queue, !atomic_read (busy), HZ/2);
+		res = wait_event_interruptible_timeout(cpad->display.queue,
+						!atomic_read (busy), HZ/2);
 		if (res<=0)
 			return res;
 	}
@@ -644,26 +650,26 @@ static inline int cpad_down(struct semaphore *sem, struct file *file)
 	return 0;
 }
 
-static void cpad_timeout_kill(unsigned long data)
+
+static inline int cpad_submit_display_urb(struct cpad_context *cpad)
 {
-	struct cpad_context *cpad = (struct cpad_context *) data;
+	int res;
 
-	cpad->display.timed_out = 1;
-	usb_unlink_urb (cpad->display.out.urb);
-	usb_unlink_urb (cpad->display.in.urb);
-	err("cpad display urb timed out");
-}
+	init_completion (&cpad->display.finished);
+	atomic_set (&cpad->display.busy, 1);
 
-static void cpad_setup_timeout(struct cpad_context *cpad)
-{
-	struct timer_list *timer = &cpad->display.timer;
-
-	init_timer(timer);
-	timer->expires = jiffies + 2*HZ;
-	timer->data = (unsigned long)cpad;
-	timer->function = cpad_timeout_kill;
-	add_timer(timer);
+	cpad->display.timer.expires = jiffies + 2*HZ;
+	add_timer(&cpad->display.timer);
 	cpad->display.timed_out = 0;
+
+	res = usb_submit_urb(cpad->display.out.urb, GFP_KERNEL);
+	cpad->display.submit_res = res;
+	if (res) {
+		del_timer_sync(&cpad->display.timer);
+		atomic_set (&cpad->display.busy, 0);
+		complete (&cpad->display.finished);
+	}
+	return res;
 }
 
 /* structure must be locked before calling this */
@@ -691,15 +697,12 @@ static int cpad_nlcd_function(struct cpad_context *cpad, unsigned char func,
 	cpad->display.out.urb->transfer_buffer_length = 3;
 
 	cpad->display.in.buffer[2] = 0;
-	res = usb_submit_urb(cpad->display.out.urb, GFP_KERNEL);
+
+	res = cpad_submit_display_urb (cpad);
 	if (res) {
-		err ("failed submitting nlcd urb, error %d", res);
+		err("failed submitting nlcd urb, error %d", res);
 		return res;
 	}
-	init_completion (&cpad->display.finished);
-	atomic_set (&cpad->display.busy, 1);
-	cpad_setup_timeout (cpad);
-
 	res = cpad_wait_interruptible (cpad);
 	if (res)
 		return res;
@@ -939,11 +942,6 @@ static void cpad_submit_int_urb(void *arg)
 	if (res)
 		err ("usb_submit_urb int in failed with result %d", res);
 
-	/* when doing 'rmmod cpad' and then 'insmod cpad' immediately,
-	 * the first write urb to the bulk endpoints always times
-	 * out (kernel 2.6.3). This bug seems to be gone in 2.6.6 (?).
-	 * The following line makes sure the first urb has no use. */
-	cpad_nlcd_function(cpad, CPAD_R_LIGHT, 0);
 	up (&cpad->sem);
 }
 
@@ -1187,14 +1185,10 @@ static ssize_t cpad_dev_write (struct file *file, const char *ubuffer,
 		goto error;
 	}
 
-	retval = usb_submit_urb(cpad->display.out.urb, GFP_KERNEL);
-	cpad->display.submit_res = retval;
+	retval = cpad_submit_display_urb(cpad);
 	if (retval) {
 		err ("failed submitting write urb, error %d", retval);
 	} else {
-		init_completion (&cpad->display.finished);
-		atomic_set (&cpad->display.busy, 1);
-		cpad_setup_timeout (cpad);
 		retval = length;
 	}
 error:
@@ -1338,7 +1332,7 @@ static void cpad_procfs_init(void)
 	if (! cpad_procfs_root)
 	{
 		disable_procfs = 1;
-		err("can't create /proc/driver/cpad");
+		err("can not create /proc/driver/cpad");
 		return;
 	}
 	cpad_procfs_root->owner = THIS_MODULE;
@@ -1370,7 +1364,7 @@ static void cpad_procfs_add(struct cpad_context *cpad)
 					cpad_procfs_root);
 	if (! procfs->entry)
 	{
-		err("can't create /proc/driver/cpad/%s", procfs->name);
+		err("can not create /proc/driver/cpad/%s", procfs->name);
 		cpad->procfs.disable = 1;
 		return;
 	}
@@ -1782,7 +1776,7 @@ static void cpad_fb_add(struct cpad_context *cpad)
 	if (register_framebuffer(&cpad->fb.info) < 0) {
 		cpad_fb_free (cpad);
 		cpad->fb.disable = 1;
-		err("couldn't register frame buffer");
+		err("could not register frame buffer");
 		return;
 	}
 
@@ -1947,18 +1941,14 @@ static int cpad_fb_sendurb(struct cpad_context *cpad, int length)
 	int res;
 
 	cpad->display.out.urb->transfer_buffer_length = length;
-	res = usb_submit_urb(cpad->display.out.urb, GFP_KERNEL);
+	res = cpad_submit_display_urb(cpad);
 	cpad->display.submit_res = res;
-	if (res) {
-		err("usb_submit_urb failed, error %d. deactivating "
-						"frame buffer", res);
-		return res;
-	}
-	init_completion (&cpad->display.finished);
-	atomic_set (&cpad->display.busy, 1);
-	cpad_setup_timeout (cpad);
+	if (res)
+		goto error;
+
 	wait_for_completion (&cpad->display.finished);
 	res = cpad_check_display_urb_errors(cpad);
+error:
 	if (res) {
 		err("sending urb failed, error %d. deactivating "
 						"frame buffer", res);

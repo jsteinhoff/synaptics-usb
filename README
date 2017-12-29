@@ -194,9 +194,6 @@ Set maximum bpp to 1 (saves 108k memory):
 
 Bugs
 ----
-- urb sometimes times out. With kernel 2.6.3 this happens always after
-  reloading the module. This is very seldom with kernel >= 2.6.6. Have not
-  tested 2.6.4 and 2.6.5.
 - With kernel >= 2.6.7 rmmod hangs while the evdev device of the cPad 
   (/dev/input/event?) is in use. usbhid.ko seems to have the same problem.
   If you are using Synaptics TouchPad driver for XFree86 and do rmmod from
@@ -205,6 +202,9 @@ Bugs
 
 Changes
 -------
+version 0.4:
+	replaced del_timer_sync with del_timer in interrupt context (bad bug)
+
 version 0.3:
 	replaced interruptible_sleep_on with wait_event_interruptible
 	removed some inline's
