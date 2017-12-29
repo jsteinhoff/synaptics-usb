@@ -6,42 +6,104 @@ The latest version is available at:
 A driver for kernel 2.4 is available at:
 	http://www.janerob.com/rob/ts5100/cPad/index.shtml
 
+The cPad is an USB touchpad with background display (240x160 mono). If you
+don't want to use the display, you do not need this driver. The cPad emulates
+an USB mouse by default, so you can use the usbhid kernel module. But you
+will be able to use Synaptics TouchPad driver for XFree86 in combination with
+this kernel module, wich will greatly improve mouse movement. The Display can
+be accessed via a frame buffer device and via a character device.
+
+
+Problems with usbhid.ko
+-----------------------
+cpad.ko must be loaded before usbhid.ko, otherwise usbhid.ko will handle the
+cPad. To avoid this, add the following line to hid_blacklist[] before { 0, 0 }
+in file drivers/usb/input/hid-core.c in the Linux source:
+	{ 0x06cb, 0x0003, HID_QUIRK_IGNORE },
+And recompile usbhid.ko. There are also some kernel patches which do the work
+for you at http://www.uni-jena.de/~p1stja/linux/cpad.html. To apply the patch,
+do
+	cat <patchfile> | patch -p1
+in the kernel source directory.
+
 
 Installation
 ------------
-To compile the module, run:	make
-To install the module, run:	make install
-				depmod -a
+The sources of your kernel must be installed and configured.
+
+Configuring the kernel:
+	At least, you need USB support in the kernel:
+		CONFIG_USB: y/m
+			Device Drivers --->
+			    USB support --->
+				Support for Host-side USB
+
+	USB will only work, if you have the right driver(s) for your USB host
+	controller. My Toshiba Laptop needs both the EHCI and the OHCI driver.
+	If unsure, just select all:
+		CONFIG_USB_EHCI_HCD and/or
+		CONFIG_USB_OHCI_HCD and/or
+		CONFIG_USB_UHCI_HCD: y/m
+			Device Drivers --->
+			    USB support --->
+				EHCI HCD (USB 2.0) support
+				OHCI HCD support
+				UHCI HCD (most Intel and VIA) support
+
+	Synaptics TouchPad driver for XFree86 needs an evdev interface:
+		CONFIG_INPUT_EVDEV: y/m
+			Device Drivers --->
+			    Input device support --->
+				Event interface
+
+	If you want to use the procfs interface, you also need this:
+		CONFIG_PROC_FS: y
+			File systems --->
+			    Pseudo filesystems --->
+				/proc file system support
+
+	If you want to use the frame buffer you need:
+		CONFIG_FB and CONFIG_FB_VESA: y
+			Device Drivers --->
+			    Graphics support --->
+				Support for frame buffer devices
+				VESA VGA graphics support
+
+	Mapping a tty on the frame buffer needs this kernel option:
+		CONFIG_FRAMEBUFFER_CONSOLE: y/m
+			Device Drivers --->
+			    Graphics support --->
+				Console display driver support --->
+				    Framebuffer Console support
+
+Installing the cpad kernel module:
+	To compile the module, run:
+		make
+	To install the module, run:
+		make install
+		depmod -a
+
+Because this driver conflicts with usbhid.ko, you have to do
+	rmmod usbhid
+	modprobe cpad
+to load the driver, or patch the kernel like described above.
 
 
-Problems with hid.ko
---------------------
-cpad.ko must be loaded before hid.ko, otherwise hid.ko will handle the cPad. To
-avoid this, add the following line to hid_blacklist[] before { 0, 0 } in file
-drivers/usb/input/hid-core.c in the Linux source:
-	{ 0x06cb, 0x0003, HID_QUIRK_IGNORE },
-And recompile hid.ko
-
-
-Using Synaptics TouchPad driver for XFree86
--------------------------------------------
-To enable features like tap-to-click, vertical/horizontal scrolling, multifinger
-taps, etc you need an additional driver for XFree86 from
+Synaptics TouchPad driver for XFree86
+-------------------------------------
+To enable features like tap-to-click, vertical/horizontal scrolling,
+multifinger taps, etc you need Synaptics TouchPad driver for XFree86
+version >= 0.13.3 in addition to this kernel module. Get it at:
 	http://w1.894.telia.com/~u89404340/touchpad/
-and a patch for this driver from:
-	http://www.uni-jena.de/~p1stja/linux/cpad.html
 
 
-Using the framebuffer device
-----------------------------
-The framebuffer device emulates 24bpp.
-Example for playing movies:
-
-echo "framerate:30" > /proc/driver/cpad/0
-mplayer -vo fbdev -fb /dev/fb1 -vf scale=240:160 <file>
-
-Software for framebuffer devices:
-	http://linux-fbdev.sourceforge.net
+Programs for the cPad character device
+--------------------------------------
+If you want to flash the backlight and display nice pictures on the cPad, then
+the program usr_cpad is the best choice. It is included in the tarball of the
+kernel 2.4 driver, available at:
+	http://www.janerob.com/rob/ts5100/cPad/index.shtml
+There is also a gallery with examples, scripts ...
 
 
 Using the procfs interface
@@ -51,20 +113,66 @@ The files /proc/driver/cpad/* show some information about the cPad.
 Flashing the backlight:
 	echo "flash:<time in 10ms>" > /proc/driver/cpad/0
 
-Enabling the framebuffer (disabled by default):
+Enabling the frame buffer (disabled by default):
 	echo "framerate:<rate>" > /proc/driver/cpad/0
 
-Disabling the framebuffer:
+Disabling the frame buffer:
 	echo "framerate:0" > /proc/driver/cpad/0
 
-Framebuffer dithering mode (default is 3):
+Frame buffer dithering mode (default is 3):
 	echo "dithering:<number from 0 to 3>" > /proc/driver/cpad/0
 
-Framebuffer brightness (default is 500):
+Frame buffer brightness (default is 200):
 	echo "brightness:<number from 0 to 10000>" > /proc/driver/cpad/0
 
 Invert black and white:
 	echo "invert:1" > /proc/driver/cpad/0
+
+
+Using the frame buffer device
+----------------------------
+Until now, the frame buffer doesn't work in FB_VISUAL_MONO01 mode, because most
+applications don't like this. That's why the frame buffer emulates 24bpp and then
+converts it to black/white using dithering. The famebuffer is disabled by
+default. You can enable it with
+	echo "framerate:30" > /proc/driver/cpad/0
+The following examples assume that your primary display is /dev/fb0, so your 
+touchpad is the second frame buffer device /dev/fb1. If you don't use vesafb or
+any other frame buffer, then your cPad will be /dev/fb0.
+
+Playing movies:
+	mplayer -vo fbdev -fb /dev/fb1 -vf scale=240:160 <file>
+
+Running XFree86:
+	You just need the following lines in the driver section of your
+	XF86Config file:
+		Driver		"fbdev"
+		Option		"fbdev"	"/dev/fb1"
+	Whould be nice if someone could write a driver for XFree86 to make the
+	touchpad act as a touchscreen.
+
+Map a tty to the frame buffer:
+	Some programs need a tty on the frame buffer to run correctly. You need
+	the program con2fb to map a tty to a frame buffer device. Get it at:
+	ftp://platan.vc.cvut.cz/pub/linux/matrox-latest/con2fb.c.gz
+	You can also use fbgetty, wich gives you a login prompt automatically:
+	ftp://ftp.debian.org/debian/pool/main/f/fbgetty/
+	Example: Do "fbgetty /dev/tty9 /dev/fb1", then press <ALT>+<F9> and you
+	should be able to login. It looks better if you invert the screen with:
+	echo "invert:1" > /proc/driver/cpad/0
+
+Other Software for frame buffer devices:
+	http://linux-fbdev.sourceforge.net
+
+
+Changes
+-------
+version 0.2:
+	fixed a color to mono conversion bug
+	added a pseudo_palette (needed by virtual terminals)
+
+version 0.1:
+	first release
 
 
 Contact

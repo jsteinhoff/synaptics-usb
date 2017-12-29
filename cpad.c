@@ -39,7 +39,7 @@
 #include "cpad.h"
 
 /* version information */
-#define DRIVER_VERSION "v0.1"
+#define DRIVER_VERSION "v0.2"
 #define DRIVER_AUTHOR "Rob Miller (rob@inpharmatica . co . uk), Ron Lee (ron@debian.org), Jan Steinhoff <jan.steinhoff@uni-jena.de>"
 #define DRIVER_DESC "USB Synaptics cPad Driver"
 
@@ -105,6 +105,7 @@ struct cpad_context {
 	struct cpad_fb {
 		int			disable;
 		void *			videomemory;
+		u32 			pseudo_palette[17];
 		struct work_struct	drawimage;
 		struct completion	draw_finished;
 		struct fb_info		info;
@@ -469,6 +470,12 @@ static void cpad_submit_int_urb(void *arg)
 	retval = usb_submit_urb (cpad->touchpad.in.urb, GFP_KERNEL);
 	if (retval)
 		err ("usb_submit_urb int in failed with result %d", retval);
+
+	/* when doing rmmod cpad and then insmod cpad immediately,
+	 * the first write urb to the bulk endpoints always times 
+	 * out (bug?). The following line makes sure the first urb
+	 * has no use. */
+	cpad_nlcd_function(cpad, CPAD_R_LIGHT, 0);
 }
 
 /*
@@ -1330,15 +1337,13 @@ static inline void cpad_procfs_del(struct cpad_context *cpad) { }
  * TODO:
  *	support for FB_VISUAL_MONO01
  *	only send changed pixels (probably with pte_young and pte_mkyoung)
- *	include fb_check_var, fb_set_par, fb_setcolreg functions in cpad_fb_ops
+ *	include fb_check_var, fb_set_par, fb_pan_display functions in cpad_fb_ops
  *	support different bpp
  */
 
 static int disable_fb = 0;
 MODULE_PARM(disable_fb, "i");
 MODULE_PARM_DESC(disable_fb, "disable cPad framebuffer device");
-
-static u_long cpad_videomemorysize = 155648;
 
 static struct fb_var_screeninfo cpad_fb_default_var = {
 	.xres =		240,
@@ -1352,12 +1357,12 @@ static struct fb_var_screeninfo cpad_fb_default_var = {
       	.activate =	FB_ACTIVATE_TEST,
       	.height =	38,
       	.width =	46,
-      	.pixclock =	20000,
-      	.left_margin =	64,
-      	.right_margin =	64,
-      	.upper_margin =	32,
-      	.lower_margin =	32,
-      	.hsync_len =	64,
+      	.pixclock =	200000,
+      	.left_margin =	16,
+      	.right_margin =	16,
+      	.upper_margin =	8,
+      	.lower_margin =	8,
+      	.hsync_len =	16,
       	.vsync_len =	2,
       	.vmode =	FB_VMODE_NONINTERLACED,
 };
@@ -1367,32 +1372,37 @@ static struct fb_fix_screeninfo cpad_fb_default_fix = {
 	.type =		FB_TYPE_PACKED_PIXELS,
 	.visual =	FB_VISUAL_TRUECOLOR,
 	.accel =	FB_ACCEL_NONE,
+	.line_length =	240*3,
+	.smem_len = 	155648,
 };
 
-static int dither2[2][2] = 	{{1, 3},
-				 {4, 2}};
+static int cpad_fb_dither2[2][2] = 	{{1, 3},
+					 {4, 2}};
 
-static int dither4[4][4] = 	{{ 1,  9,  3, 11},
-				 {13,  5, 15,  7},
-				 { 4, 12,  2, 10},
-				 {16,  8, 14,  6}};
+static int cpad_fb_dither4[4][4] = 	{{ 1,  9,  3, 11},
+					 {13,  5, 15,  7},
+					 { 4, 12,  2, 10},
+					 {16,  8, 14,  6}};
 
-static int dither8[8][8] = 	{{ 1, 33,  9, 41,  3, 35, 11, 43},
-				 {49, 17, 57, 25, 51, 19, 59, 27},
-				 {13, 45,  5, 37, 15, 47,  7, 39},
-				 {61, 29, 53, 21, 63, 31, 55, 23},
-				 { 4, 36, 12, 44,  2, 34, 10, 42},
-				 {52, 20, 60, 28, 50, 18, 58, 26},
-				 {16, 48,  8, 40, 14, 46,  6, 38},
-				 {64, 32, 56, 24, 62, 30, 54, 22}};
+static int cpad_fb_dither8[8][8] = 	{{ 1, 33,  9, 41,  3, 35, 11, 43},
+					 {49, 17, 57, 25, 51, 19, 59, 27},
+					 {13, 45,  5, 37, 15, 47,  7, 39},
+					 {61, 29, 53, 21, 63, 31, 55, 23},
+					 { 4, 36, 12, 44,  2, 34, 10, 42},
+					 {52, 20, 60, 28, 50, 18, 58, 26},
+					 {16, 48,  8, 40, 14, 46,  6, 38},
+					 {64, 32, 56, 24, 62, 30, 54, 22}};
 
 /* framebuffer device prototypes */
+static int cpad_fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
+			     u_int transp, struct fb_info *info);
 static int cpad_fb_mmap(struct fb_info *info, struct file *file,
 		    struct vm_area_struct *vma);
 static void cpad_fb_drawimage(void *arg);
 
 static struct fb_ops cpad_fb_ops = {
 	.owner		= THIS_MODULE,
+	.fb_setcolreg	= cpad_fb_setcolreg,
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
@@ -1403,21 +1413,22 @@ static struct fb_ops cpad_fb_ops = {
 static inline void cpad_fb_init(struct cpad_context *cpad)
 {
 	struct fb_info *info = &cpad->fb.info;
-	u_long size;
+	u_long vsize, size;
 	void *adr;
 
 	if (disable_fb)
 		return;
 
-	if (!(cpad->fb.videomemory = vmalloc(cpad_videomemorysize))) {
+	vsize = cpad_fb_default_fix.smem_len;
+	if (!(cpad->fb.videomemory = vmalloc(vsize))) {
 		cpad->fb.disable = 1;
 		err("not enough memory for framebuffer");
 		return;
 	}
 
-	memset(cpad->fb.videomemory, 0, cpad_videomemorysize);
+	memset(cpad->fb.videomemory, 0, vsize);
 	adr = cpad->fb.videomemory;
-	size = cpad_videomemorysize;
+	size = vsize;
 	while (size > 0) {
 		SetPageReserved(vmalloc_to_page(adr));
 		adr += PAGE_SIZE;
@@ -1428,11 +1439,10 @@ static inline void cpad_fb_init(struct cpad_context *cpad)
 	info->fbops = &cpad_fb_ops;
 	info->var = cpad_fb_default_var;
 	info->fix = cpad_fb_default_fix;
-	info->fix.line_length = 240*3;
-	info->fix.smem_len = cpad_videomemorysize;
+	info->pseudo_palette = &cpad->fb.pseudo_palette;
 	info->flags = FBINFO_FLAG_DEFAULT;
+	fb_alloc_cmap(&cpad->fb.info.cmap, 16, 0);
 	info->par = cpad;
-	fb_alloc_cmap(&cpad->fb.info.cmap, 256, 0);
 
 	if (register_framebuffer(&cpad->fb.info) < 0) {
 		vfree(cpad->fb.videomemory);
@@ -1441,7 +1451,7 @@ static inline void cpad_fb_init(struct cpad_context *cpad)
 		return;
 	}
 
-	cpad->fb.brightness = 500;
+	cpad->fb.brightness = 200;
 	cpad->fb.dither = 3;
 }
 
@@ -1456,7 +1466,7 @@ static inline void cpad_fb_remove(struct cpad_context *cpad)
 
 	unregister_framebuffer(&cpad->fb.info);
 	adr = (unsigned long) cpad->fb.videomemory;
-	size = cpad_videomemorysize;
+	size = cpad->fb.info.fix.smem_len;
 	while ((long) size > 0) {
 		ClearPageReserved(vmalloc_to_page((void *)adr));
 		adr += PAGE_SIZE;
@@ -1490,8 +1500,24 @@ static void cpad_fb_deactivate(struct cpad_context *cpad)
 	}
 }
 
+static int cpad_fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
+			     u_int transp, struct fb_info *info)
+{
+	if (regno >= 16)
+		return 1;
+
+	red   >>= 8;
+	green >>= 8;
+	blue  >>= 8;
+	((u32 *)(info->pseudo_palette))[regno] =
+		(red   << info->var.red.offset)   |
+		(green << info->var.green.offset) |
+		(blue  << info->var.blue.offset);
+	return 0;
+}
+
 static int cpad_fb_mmap(struct fb_info *info, struct file *file,
-		    struct vm_area_struct *vma)
+			struct vm_area_struct *vma)
 {
 	unsigned long page, kva, pos;
 	unsigned long start = vma->vm_start;
@@ -1500,7 +1526,7 @@ static int cpad_fb_mmap(struct fb_info *info, struct file *file,
 	if (!info)
 		return -ENODEV;
 
-	if (size > cpad_videomemorysize)
+	if (size > info->fix.smem_len)
 		return -EINVAL;
 
 	pos = (unsigned long) info->screen_base;
@@ -1528,8 +1554,8 @@ static void cpad_fb_drawimage(void *arg) {
 	unsigned char *tmpbuf = cpad->display.tmpbuf;
 	unsigned char *tmpbuf_pos;
 	unsigned char *tbuffer_pos = out->buffer;
-	const char *ubuffer_pos = cpad->fb.videomemory;
-	size_t ulength, uremaining, actual_length;
+	unsigned char *vbuffer_pos = cpad->fb.videomemory;
+	size_t llength, vremaining, actual_length;
 	int res, i, j, grey, maxgrey, black, x, y;
 
 	if (!cpad->fb.active) {
@@ -1575,20 +1601,20 @@ static void cpad_fb_drawimage(void *arg) {
 
 	tbuffer_pos = out->buffer;
 	actual_length = 0;
-	uremaining = 160*30;
+	vremaining = 160*30;
 	maxgrey = 255*10;
 	black = 0;
 	y = 0;
-	while (uremaining > 0) {
-		ulength = min (cpad->display.tmpbuf_size, uremaining);
-		if (actual_length+ulength > out->buffer_size)
+	while (vremaining > 0) {
+		llength = min (cpad->display.tmpbuf_size, vremaining);
+		if (actual_length+llength > out->buffer_size)
 			break;
 
 		/* convert line */
 		x = 0;
 		for (i=0; i<30; i++)
 			for (j=7; j>=0; j--) {
-				grey = 3*ubuffer_pos[0] + 6*ubuffer_pos[1] + ubuffer_pos[2];
+				grey = 3*vbuffer_pos[0] + 6*vbuffer_pos[1] + vbuffer_pos[2];
 				grey = min((grey*cpad->fb.brightness)/100, maxgrey);
 
 				switch (cpad->fb.dither) {
@@ -1596,13 +1622,13 @@ static void cpad_fb_drawimage(void *arg) {
 					black = (2*grey > maxgrey) ? 0 : 1;
 					break;
 				case 1:
-					black = (5*grey > dither2[x%2][y%2]*maxgrey) ? 0 : 1;
+					black = (5*grey > cpad_fb_dither2[x%2][y%2]*maxgrey) ? 0 : 1;
 					break;
 				case 2:
-					black = (17*grey > dither4[x%4][y%4]*maxgrey) ? 0 : 1;
+					black = (17*grey > cpad_fb_dither4[x%4][y%4]*maxgrey) ? 0 : 1;
 					break;
 				case 3:
-					black = (65*grey > dither8[x%8][y%8]*maxgrey) ? 0 : 1;
+					black = (65*grey > cpad_fb_dither8[x%8][y%8]*maxgrey) ? 0 : 1;
 				}
 
 				if (cpad->fb.invert)
@@ -1614,18 +1640,18 @@ static void cpad_fb_drawimage(void *arg) {
 				else {
 					tmpbuf[i] &= ~(1 << j);
 				}
-				ubuffer_pos += 3;
+				vbuffer_pos += 3;
 				x++;
 			}
-		uremaining -= ulength;
+		vremaining -= llength;
 		y ++;
 
 		/* here we set the 1335 select, 1335 command, and reverse the params */
 		*(tbuffer_pos++) = SEL_1335;
 		*(tbuffer_pos++) = MWRITE_1335;
-		for (tmpbuf_pos=tmpbuf+ulength-1; tmpbuf_pos>=tmpbuf; tmpbuf_pos--)
+		for (tmpbuf_pos=tmpbuf+llength-1; tmpbuf_pos>=tmpbuf; tmpbuf_pos--)
 			*(tbuffer_pos++) = *tmpbuf_pos;
-		actual_length += ulength + 2;
+		actual_length += llength + 2;
 	}
 
 	/* this urb was already set up, except for this write size */
@@ -1657,8 +1683,6 @@ static void cpad_fb_drawimage(void *arg) {
 	schedule_delayed_work (&cpad->fb.drawimage, HZ/cpad->fb.rate);
 
 	up (&cpad->sem);
-
-	return;
 }
 
 #else /* CONFIG_USB_CPADFB */
