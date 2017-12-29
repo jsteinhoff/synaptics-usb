@@ -47,7 +47,7 @@
  * be accessed by
  *	01 <function> <state>
  * the packet must be send to the bulk out endpoint. these functions can be
- * accessed via ioctls or procfs.
+ * accessed via ioctls.
  *
  * observed functions are: */
 #define CPAD_W_ROM	0x01	/* write EEPROM (not supported) */
@@ -72,23 +72,16 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/module.h>
-#include <linux/kref.h>
 #include <asm/uaccess.h>
 #include <linux/usb.h>
 #include <linux/moduleparam.h>
 
 #include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,5)
+#include <linux/kref.h>
+#endif
+#include "kernel-compatibility.h"
 #include "cpad.h"
-
-#if !defined(CONFIG_USB) && !defined(CONFIG_USB_MODULE)
-#error : kernel has no USB support. Compile kernel with CONFIG_USB.
-#endif
-#if !defined(CONFIG_INPUT) && !defined(CONFIG_INPUT_MODULE)
-#error : No input support. Compile kernel with CONFIG_INPUT to enable it.
-#endif
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,8)
-#define usb_kill_urb(urb) usb_unlink_urb(urb)
-#endif
 
 #undef err
 #undef info
@@ -98,7 +91,7 @@
 #define info(format, arg...) printk(KERN_INFO "cpad: " format "\n", ## arg)
 #define warn(format, arg...) printk(KERN_WARNING "cpad: " format "\n", ## arg)
 
-#define DRIVER_VERSION "v1.0"
+#define DRIVER_VERSION "v1.1"
 #define DRIVER_AUTHOR	"Rob Miller (rob@inpharmatica . co . uk), "\
 			"Ron Lee (ron@debian.org), "\
 			"Jan Steinhoff <jan.steinhoff@uni-jena.de>"
@@ -685,7 +678,9 @@ static void cpad_init_input(struct cpad_context *cpad)
 	idev->id.vendor = udev->descriptor.idVendor;
 	idev->id.product = udev->descriptor.idProduct;
 	idev->id.version = udev->descriptor.bcdDevice;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,2)
 	idev->dev = &cpad->interface->dev;
+#endif
 
 	input_register_device(idev);
 
@@ -903,6 +898,7 @@ static void repossess_devices( struct usb_driver *driver, struct usb_device_id *
 	if (!steal || !cpad_registered)
 		return;
 
+	steal = 0;
 	while( id->idVendor )
 	{
 		// XXX Not enough, we need to find ALL devices, not just the
@@ -911,20 +907,21 @@ static void repossess_devices( struct usb_driver *driver, struct usb_device_id *
 
 		if (udev)
 		{
+			struct usb_interface    *interface;
+
 			down_write( &udev->dev.bus->subsys.rwsem );
 			usb_lock_device( udev );
 
-			struct usb_interface    *interface = usb_ifnum_to_if(udev, 0);
+			interface = usb_ifnum_to_if(udev, 0);
 
-			if( interface->dev.driver &&
-			    interface->dev.driver->owner != driver->driver.owner )
+			if ( interface->dev.driver != &driver->driver )
 			{
 			    info( "current = '%s' - '%s' -- this = '%s'",
 				    udev->dev.driver->name,
 				    interface->dev.driver->name,
 				    driver->driver.name);
 
-			    if (interface && usb_interface_claimed(interface))
+			    if (usb_interface_claimed(interface))
 			    {
 				    info("releasing '%s' from generic driver '%s'.",
 					 interface->dev.kobj.k_name,
@@ -944,7 +941,6 @@ static void repossess_devices( struct usb_driver *driver, struct usb_device_id *
 		}
 		++id;
 	}
-	steal = 0;
 }
 
 static int cpad_set_steal(const char *val, struct kernel_param *kp)
