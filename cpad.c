@@ -251,17 +251,18 @@ static int __init cpad_init(void)
 		usb_put_dev(udev);
 	}
 
+	cpad_procfs_init();
 	result = usb_register(&cpad_driver);
 
 	if (udev)
 		up( &udev->serialize );
 
 	if (result == 0) {
-		cpad_procfs_init();
 		info(DRIVER_DESC " " DRIVER_VERSION);
-	}
-	else
+	} else {
 		err("usb_register failed. Error number %d", result);
+		cpad_procfs_exit();
+	}
 
 	return result;
 }
