@@ -45,6 +45,7 @@ rebind () {
 }
 
 rebind_stick () {
+	ddir=/sys/bus/usb/drivers/$2
 	if [ `cat $1/idProduct` = "0009" ] ; then
 		int_num=":1.1"
 	fi

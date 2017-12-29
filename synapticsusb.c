@@ -392,8 +392,8 @@ MODULE_PARM_DESC(enable_stick, "enable trackoint support");
 MODULE_PARM_DESC(enable_screen, "enable touchscreen support");
 static int enable_stick = 0;
 static int enable_screen = 0;
-module_param(enable_stick, int, 0444);
-module_param(enable_screen, int, 0444);
+module_param(enable_stick, int, 0644);
+module_param(enable_screen, int, 0644);
 
 static int synusb_detect_type(struct synusb *synusb, const struct usb_device_id *id)
 {
