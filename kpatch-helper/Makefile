@@ -9,7 +9,8 @@ version.h:
 version_code:	version.h
 
 clean:
-	$(RM) -fr *~ version.h version_code tmp
+	$(RM) -fr version.h version_code tmp
 
 mrproper:	clean
+	$(RM) -f *~
 

@@ -1,5 +1,5 @@
 KVERSION	:= `uname -r`
-DVERSION	:= 1.4
+DVERSION	:= 1.5
 KSRC		:= /lib/modules/$(KVERSION)/build
 MODINSTDIR	:= /lib/modules/$(KVERSION)/kernel/drivers/input/mouse
 INSTDIR		:= /usr/local/sbin
@@ -7,10 +7,10 @@ INSTDIR		:= /usr/local/sbin
 obj-m		:= synaptics-usb.o
 
 all:
-	$(MAKE) -C $(KSRC) SUBDIRS=`pwd` CPATH=`pwd`
-#	$(MAKE) modules -C $(KSRC) SUBDIRS=`pwd` CPATH=`pwd`
+	$(MAKE) -C $(KSRC) M=`pwd` CPATH=`pwd` modules
+#	$(MAKE) -C $(KSRC) SUBDIRS=`pwd` CPATH=`pwd` modules
 
-.PHONY: clean patchfile patch-kernel mrproper install
+.PHONY: all clean patchfile patch-kernel mrproper install uninstall
 
 patchfile:
 	$(MAKE) KSRC=$(KSRC) KVERSION=$(KVERSION) DVERSION=$(DVERSION) -C kpatch-helper
@@ -19,10 +19,12 @@ patch-kernel:	patchfile
 	kpatch-helper/patch-kernel $(KSRC) $(KVERSION) $(DVERSION)
 
 clean:
-	$(RM) -fr *.o *.ko *.mod.c .*.cmd .tmp_versions Modules.symvers Module.symvers Module.markers modules.order *~ linux/*~
+	$(MAKE) -C $(KSRC) M=`pwd` clean
+#	$(RM) -fr *.o *.ko *.mod.c .*.cmd .tmp_versions Module.symvers Module.markers modules.order
 	$(MAKE) clean -C kpatch-helper
 
 mrproper:	clean
+	$(RM) -f *~ linux/*~
 	$(MAKE) mrproper -C kpatch-helper
 	$(RM) -f kernel-patches/synaptics-usb-*.patch
 

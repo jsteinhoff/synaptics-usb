@@ -45,7 +45,7 @@
  *	the cPad display is controlled by a Seiko/Epson 1335 LCD Controller IC
  *	a write to the device consists of a command followed by data:
  *		<1335 command> [<data> ...]
- *	for MRWITE_1335 command, data may be up to 274*30 bytes long
+ *	for the MRWITE_1335 command, data may be up to 274*30 bytes long
  *	possible commands as reported in the sed1335 data sheet are:
  */
 /* System control */

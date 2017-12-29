@@ -6,6 +6,7 @@ print_help () {
 	echo
 	echo "rebind_to 	: <value> is the name of the kernel module where"
 	echo "		  to rebind to, i.e. synaptics-usb or usbhid."
+	echo "rebind_stick_to	: same as rebind_to for sticks instead of touchpads"
 	echo "persist		: set if device is persitent during hibernation,"
 	echo "		  value can be on or off"
 	echo "suspend		: set suspend state, value can be on, off or auto."
@@ -15,11 +16,13 @@ print_help () {
 }
 
 vendor=06cb
-device_list="0001 0002 0003 0008 0009"
+pad_device_list="0001 0002 0003 0008 0009"
+stick_device_list="0007 0009"
+int_num=":1.0"
 
 rebind () {
 	ddir=/sys/bus/usb/drivers/$2
-	idir=$1\:1.0
+	idir="$1$int_num"
 	if [ $2 = synaptics-usb ] && [ -f $ddir/new_id ] ; then
 		for i in $device_list ; do
 			echo "$vendor $i" > $ddir/new_id
@@ -38,6 +41,13 @@ rebind () {
 			echo "ERROR: Can not rebind interface $interface"
 		fi
 	fi
+}
+
+rebind_stick_to () {
+	if [ `cat $1/idProduct` = "0009" ] ; then
+		int_num=":2.0"
+	fi
+	rebind $1 $2
 }
 
 persist () {
@@ -90,7 +100,10 @@ if [ $# -ne 2 ] ; then
 fi
 
 case $1 in
-	rebind_to) 	do_all rebind $2 ;;
+	rebind_to) 	device_list=$pad_device_list
+			do_all rebind $2 ;;
+	rebind_stick_to) device_list=$stick_device_list
+			do_all rebind_stick $2 ;;
 	persist)	do_all persist $2 ;;
 	suspend)	do_all susp $2 ;;
 	autosuspend)	do_all autosuspend $2 ;;

@@ -19,3 +19,14 @@
 #define CONFIG_USB_CPADDEV
 /* uncomment the following to disable it */
 //#undef CONFIG_USB_CPADDEV
+
+/* enable debugging messages */
+//#define DEBUG 1
+
+#undef dbg
+#ifdef DEBUG
+#define dbg(format, arg...) printk(KERN_DEBUG "%s: " format "\n" , \
+	__FILE__ , ## arg)
+#else
+#define dbg(format, arg...) do {} while (0)
+#endif
