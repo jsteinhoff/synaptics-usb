@@ -730,6 +730,8 @@ int cpad_setup_out(struct synusb *synusb,
 
 int cpad_check_setup(struct synusb *synusb)
 {
+	if (!synusb->display)
+		return 0;
 	if ((synusb->display->in_endpointAddr) && (synusb->display->out_endpointAddr))
 		return 0;
 
