@@ -1,0 +1,72 @@
+Synaptics cPad Linux driver for kernel 2.6
+==========================================
+
+The latest version is available at:
+	http://www.uni-jena.de/~p1stja/linux/cpad.html
+A driver for kernel 2.4 is available at:
+	http://www.janerob.com/rob/ts5100/cPad/index.shtml
+
+
+Installation
+------------
+To compile the module, run:	make
+To install the module, run:	make install
+				depmod -a
+
+
+Problems with hid.ko
+--------------------
+cpad.ko must be loaded before hid.ko, otherwise hid.ko will handle the cPad. To
+avoid this, add the following line to hid_blacklist[] before { 0, 0 } in file
+drivers/usb/input/hid-core.c in the Linux source:
+	{ 0x06cb, 0x0003, HID_QUIRK_IGNORE },
+And recompile hid.ko
+
+
+Using Synaptics TouchPad driver for XFree86
+-------------------------------------------
+To enable features like tap-to-click, vertical/horizontal scrolling, multifinger
+taps, etc you need an additional driver for XFree86 from
+	http://w1.894.telia.com/~u89404340/touchpad/
+and a patch for this driver from:
+	http://www.uni-jena.de/~p1stja/linux/cpad.html
+
+
+Using the framebuffer device
+----------------------------
+The framebuffer device emulates 24bpp.
+Example for playing movies:
+
+echo "framerate:30" > /proc/driver/cpad/0
+mplayer -vo fbdev -fb /dev/fb1 -vf scale=240:160 <file>
+
+Software for framebuffer devices:
+	http://linux-fbdev.sourceforge.net
+
+
+Using the procfs interface
+--------------------------
+The files /proc/driver/cpad/* show some information about the cPad.
+
+Flashing the backlight:
+	echo "flash:<time in 10ms>" > /proc/driver/cpad/0
+
+Enabling the framebuffer (disabled by default):
+	echo "framerate:<rate>" > /proc/driver/cpad/0
+
+Disabling the framebuffer:
+	echo "framerate:0" > /proc/driver/cpad/0
+
+Framebuffer dithering mode (default is 3):
+	echo "dithering:<number from 0 to 3>" > /proc/driver/cpad/0
+
+Framebuffer brightness (default is 500):
+	echo "brightness:<number from 0 to 10000>" > /proc/driver/cpad/0
+
+Invert black and white:
+	echo "invert:1" > /proc/driver/cpad/0
+
+
+Contact
+-------
+Jan Steinhoff <jan.steinhoff@uni-jena.de>
